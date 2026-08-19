@@ -2,7 +2,7 @@
 CONFIG_IDF_TARGET="esp32s3"
 
 # USB OTG (ESP32-S3 native USB)
-CONFIG_TINYUSB_HID_COUNT=2
+CONFIG_TINYUSB_HID_COUNT=3
 
 # Boards like Seeed XIAO ESP32S3 expose only a single USB-C port wired to
 # the native USB pins (GPIO19/20). Once TinyUSB claims that port as the

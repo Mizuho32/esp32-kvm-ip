@@ -6,17 +6,78 @@
 static const char *TAG = "USB_DESC";
 
 // ═══════════════════════════════════════════════════════════════════
-//  HID REPORT DESCRIPTORS - one dedicated Boot-capable interface each
-//  for Keyboard and Mouse (no Report ID, so Boot/Report protocol send
-//  identical bytes - see TUD_HID_REPORT_DESC_* usage below).
+//  HID REPORT DESCRIPTORS
+//  Only consulted in Report Protocol mode - see usb_descriptors.h.
 // ═══════════════════════════════════════════════════════════════════
 
+// Keyboard: TinyUSB's stock template already matches the Boot Protocol
+// layout (hid_keyboard_report_t), so it's used unchanged in both modes.
 static const uint8_t s_hid_report_descriptor_keyboard[] = {
     TUD_HID_REPORT_DESC_KEYBOARD(),
 };
 
+// Mouse (Report Protocol mode): 5 buttons, 16-bit X/Y, 8-bit wheel + pan.
+// In Boot Protocol mode the firmware instead sends TinyUSB's compact
+// hid_mouse_report_t (8-bit X/Y) - this descriptor is never consulted
+// then, so the two formats can coexist on the same interface/endpoint.
 static const uint8_t s_hid_report_descriptor_mouse[] = {
-    TUD_HID_REPORT_DESC_MOUSE(),
+    HID_USAGE_PAGE ( HID_USAGE_PAGE_DESKTOP      ),
+    HID_USAGE      ( HID_USAGE_DESKTOP_MOUSE     ),
+    HID_COLLECTION ( HID_COLLECTION_APPLICATION   ),
+
+      HID_USAGE      ( HID_USAGE_DESKTOP_POINTER  ),
+      HID_COLLECTION ( HID_COLLECTION_PHYSICAL     ),
+
+        // ── 5 mouse buttons ────────────────────────────────────────
+        HID_USAGE_PAGE  ( HID_USAGE_PAGE_BUTTON    ),
+        HID_USAGE_MIN   ( 1                         ),
+        HID_USAGE_MAX   ( 5                         ),
+        HID_LOGICAL_MIN ( 0                         ),
+        HID_LOGICAL_MAX ( 1                         ),
+        HID_REPORT_COUNT( 5                         ),
+        HID_REPORT_SIZE ( 1                         ),
+        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ),
+
+        // ── 3 padding bits to complete a byte ─────────────────────
+        HID_REPORT_COUNT( 1                         ),
+        HID_REPORT_SIZE ( 3                         ),
+        HID_INPUT       ( HID_CONSTANT              ),
+
+        // ── X, Y: 16-bit relative movement ───────────────────────
+        HID_USAGE_PAGE  ( HID_USAGE_PAGE_DESKTOP    ),
+        HID_USAGE       ( HID_USAGE_DESKTOP_X       ),
+        HID_USAGE       ( HID_USAGE_DESKTOP_Y       ),
+        HID_LOGICAL_MIN_N( -32767, 2                ),
+        HID_LOGICAL_MAX_N(  32767, 2                ),
+        HID_REPORT_SIZE ( 16                         ),
+        HID_REPORT_COUNT( 2                          ),
+        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
+
+        // ── Vertical wheel: 8-bit ─────────────────────────────────
+        HID_USAGE       ( HID_USAGE_DESKTOP_WHEEL   ),
+        HID_LOGICAL_MIN ( -127                       ),
+        HID_LOGICAL_MAX (  127                       ),
+        HID_REPORT_SIZE ( 8                          ),
+        HID_REPORT_COUNT( 1                          ),
+        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
+
+        // ── Horizontal wheel (AC Pan): 8-bit ──────────────────────
+        HID_USAGE_PAGE  ( HID_USAGE_PAGE_CONSUMER            ),
+        HID_USAGE_N     ( HID_USAGE_CONSUMER_AC_PAN, 2       ),
+        HID_LOGICAL_MIN ( -127                                ),
+        HID_LOGICAL_MAX (  127                                ),
+        HID_REPORT_SIZE ( 8                                   ),
+        HID_REPORT_COUNT( 1                                   ),
+        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
+
+      HID_COLLECTION_END,
+    HID_COLLECTION_END,
+};
+
+// Consumer Control (media/browser keys) - Report Protocol only, no Boot
+// Protocol equivalent exists so BIOS simply never sees this interface.
+static const uint8_t s_hid_report_descriptor_consumer[] = {
+    TUD_HID_REPORT_DESC_CONSUMER(),
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -46,9 +107,15 @@ tusb_desc_device_t s_device_descriptor = {
 
 #define EPNUM_HID_KEYBOARD 0x81
 #define EPNUM_HID_MOUSE    0x82
+#define EPNUM_HID_CONSUMER 0x83
 #define HID_POLL_INTERVAL  1
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_HID_DESC_LEN)
+// Mouse endpoint must fit the larger of the two formats it sends
+// (7-byte Report-mode mouse_report_t vs 5-byte Boot-mode hid_mouse_report_t).
+#define MOUSE_EP_SIZE (sizeof(mouse_report_t) > sizeof(hid_mouse_report_t) \
+                       ? sizeof(mouse_report_t) : sizeof(hid_mouse_report_t))
+
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN * 3)
 
 const uint8_t s_configuration_descriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
@@ -65,7 +132,13 @@ const uint8_t s_configuration_descriptor[] = {
     // Boot Mouse interface
     TUD_HID_DESCRIPTOR(ITF_NUM_MOUSE, 0, HID_ITF_PROTOCOL_MOUSE,
                        sizeof(s_hid_report_descriptor_mouse),
-                       EPNUM_HID_MOUSE, sizeof(hid_mouse_report_t),
+                       EPNUM_HID_MOUSE, MOUSE_EP_SIZE,
+                       HID_POLL_INTERVAL),
+
+    // Consumer Control interface - not Boot-capable (protocol = NONE)
+    TUD_HID_DESCRIPTOR(ITF_NUM_CONSUMER, 0, HID_ITF_PROTOCOL_NONE,
+                       sizeof(s_hid_report_descriptor_consumer),
+                       EPNUM_HID_CONSUMER, sizeof(consumer_report_t),
                        HID_POLL_INTERVAL),
 };
 
@@ -105,6 +178,7 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {
     switch (instance) {
         case ITF_NUM_KEYBOARD: return s_hid_report_descriptor_keyboard;
         case ITF_NUM_MOUSE:    return s_hid_report_descriptor_mouse;
+        case ITF_NUM_CONSUMER: return s_hid_report_descriptor_consumer;
         default:                return NULL;
     }
 }
@@ -132,8 +206,8 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
 }
 
 // Invoked when the host switches Boot <-> Report protocol (SET_PROTOCOL).
-// No behavior change needed: both protocols use the same fixed report
-// layout (hid_keyboard_report_t / hid_mouse_report_t, no Report ID).
+// No state to update here: hid_task.c reads tud_hid_n_get_protocol()
+// itself at send time to pick the Boot vs Report mouse format.
 void tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol) {
     ESP_LOGI(TAG, "itf %u protocol -> %s", instance,
              protocol == HID_PROTOCOL_BOOT ? "BOOT" : "REPORT");
