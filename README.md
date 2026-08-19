@@ -75,9 +75,15 @@ The Target PC sees a regular USB keyboard and mouse, no drivers or software requ
 
 4. Build and flash:
    ```
-   idf.py build flash monitor
+   idf.py build flash
    ```
    The ESP32 will connect to WiFi and start listening on UDP port 4210.
+
+   Note: on boards with a single native-USB port (e.g. XIAO ESP32S3), that
+   port is claimed by the HID device once the app starts, so `idf.py monitor`
+   won't show any output there. Console logs are routed to UART0 instead —
+   connect an external USB-UART adapter to the board's UART0 TX/RX pins and
+   open that serial port (e.g. `idf.py -p <uart-port> monitor`) to view logs.
 
 ### Server (Host PC)
 
