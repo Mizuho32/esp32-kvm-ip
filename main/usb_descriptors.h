@@ -2,41 +2,23 @@
 #define USB_DESCRIPTORS_H
 
 #include <stdint.h>
+#include "tusb.h"
+#include "class/hid/hid_device.h"
 
-#define REPORT_ID_MOUSE    1
-#define REPORT_ID_KEYBOARD 2
-#define REPORT_ID_CONSUMER 3
+// Two separate HID interfaces (no Report ID), each Boot Protocol capable.
+// TinyUSB HID class-driver "instance" numbers are assigned in interface
+// order, so these double as both interface numbers and instance indices.
+#define ITF_NUM_KEYBOARD 0
+#define ITF_NUM_MOUSE    1
+#define ITF_NUM_TOTAL    2
 
-// USB HID report structures sent to the host
-// (without Report ID - TinyUSB adds it automatically)
-
-typedef struct __attribute__((packed)) {
-    uint8_t buttons;    // bit0=Left, bit1=Right, bit2=Middle, bit3=Back, bit4=Forward
-    int16_t x;          // Relative movement X (-32767 … +32767)
-    int16_t y;          // Relative movement Y
-    int8_t  wheel;      // Vertical scroll  (-127 … +127)
-    int8_t  pan;        // Horizontal scroll (-127 … +127)
-} mouse_report_t;       // 7 bytes
-
-_Static_assert(sizeof(mouse_report_t) == 7, "Mouse report must be 7 bytes");
-
-typedef struct __attribute__((packed)) {
-    uint8_t modifiers;  // Bitmap: b0=LCtrl b1=LShift b2=LAlt b3=LGUI
-                        //         b4=RCtrl b5=RShift b6=RAlt b7=RGUI
-    uint8_t reserved;   // Always 0x00
-    uint8_t keycodes[6];// Up to 6 simultaneous keys (HID Usage ID)
-} keyboard_report_t;    // 8 bytes
-
-_Static_assert(sizeof(keyboard_report_t) == 8, "Keyboard report must be 8 bytes");
-
-typedef struct __attribute__((packed)) {
-    uint16_t usage_id;  // Consumer Usage ID (0x0C page), 0 = release
-} consumer_report_t;    // 2 bytes
-
-_Static_assert(sizeof(consumer_report_t) == 2, "Consumer report must be 2 bytes");
+// hid_keyboard_report_t / hid_mouse_report_t (from class/hid/hid_device.h)
+// are TinyUSB's own "Standard HID Boot Protocol Report" structs - using
+// them directly (with no Report ID) means the exact same bytes sent are
+// valid in both Boot Protocol and Report Protocol mode, so no runtime
+// protocol-switch handling is required.
 
 // USB descriptors (defined in usb_descriptors.c)
-#include "tusb.h"
 extern tusb_desc_device_t s_device_descriptor;
 extern const uint8_t s_configuration_descriptor[];
 extern const char *s_string_descriptors[];

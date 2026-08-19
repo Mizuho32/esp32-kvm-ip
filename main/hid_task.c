@@ -14,10 +14,19 @@
 
 extern QueueHandle_t hid_event_queue;
 
-static void wait_for_hid_ready(void) {
-    while (!tud_hid_ready()) {
+static void wait_for_hid_ready(uint8_t instance) {
+    while (!tud_hid_n_ready(instance)) {
         vTaskDelay(pdMS_TO_TICKS(1));
     }
+}
+
+// Boot Protocol mouse reports are 8-bit relative X/Y (see
+// hid_mouse_report_t) - clamp the wider UDP delta into that range instead
+// of silently truncating it.
+static int8_t clamp_to_i8(int16_t v) {
+    if (v > 127) return 127;
+    if (v < -127) return -127;
+    return (int8_t)v;
 }
 
 void hid_task(void *pvParameters) {
@@ -27,38 +36,36 @@ void hid_task(void *pvParameters) {
 
     while (1) {
         if (xQueueReceive(hid_event_queue, &event, portMAX_DELAY) == pdTRUE) {
-            wait_for_hid_ready();
-
             switch (event.type) {
                 case EVENT_TYPE_MOUSE: {
-                    mouse_report_t report = {
+                    hid_mouse_report_t report = {
                         .buttons = event.mouse.buttons,
-                        .x       = event.mouse.dx,
-                        .y       = event.mouse.dy,
+                        .x       = clamp_to_i8(event.mouse.dx),
+                        .y       = clamp_to_i8(event.mouse.dy),
                         .wheel   = event.mouse.wheel,
                         .pan     = event.mouse.pan,
                     };
-                    tud_hid_report(REPORT_ID_MOUSE, &report, sizeof(report));
+                    wait_for_hid_ready(ITF_NUM_MOUSE);
+                    tud_hid_n_report(ITF_NUM_MOUSE, 0, &report, sizeof(report));
                     break;
                 }
 
                 case EVENT_TYPE_KEYBOARD: {
-                    keyboard_report_t report = {
-                        .modifiers = event.keyboard.modifiers,
-                        .reserved  = 0x00,
+                    hid_keyboard_report_t report = {
+                        .modifier = event.keyboard.modifiers,
+                        .reserved = 0x00,
                     };
-                    memcpy(report.keycodes, event.keyboard.keycodes, 6);
-                    tud_hid_report(REPORT_ID_KEYBOARD, &report, sizeof(report));
+                    memcpy(report.keycode, event.keyboard.keycodes, 6);
+                    wait_for_hid_ready(ITF_NUM_KEYBOARD);
+                    tud_hid_n_report(ITF_NUM_KEYBOARD, 0, &report, sizeof(report));
                     break;
                 }
 
-                case EVENT_TYPE_CONSUMER: {
-                    consumer_report_t report = {
-                        .usage_id = event.consumer.usage_id,
-                    };
-                    tud_hid_report(REPORT_ID_CONSUMER, &report, sizeof(report));
+                case EVENT_TYPE_CONSUMER:
+                    // Consumer Control (media keys) is out of scope for the
+                    // BIOS-focused Boot Protocol build - no HID interface
+                    // exposes it, so silently drop.
                     break;
-                }
 
                 default:
                     break;

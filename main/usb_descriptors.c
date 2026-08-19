@@ -1,127 +1,22 @@
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
 #include "usb_descriptors.h"
+#include "esp_log.h"
+
+static const char *TAG = "USB_DESC";
 
 // ═══════════════════════════════════════════════════════════════════
-//  HID REPORT DESCRIPTOR - Composite: Mouse (ID=1) + Keyboard (ID=2) + Consumer (ID=3)
+//  HID REPORT DESCRIPTORS - one dedicated Boot-capable interface each
+//  for Keyboard and Mouse (no Report ID, so Boot/Report protocol send
+//  identical bytes - see TUD_HID_REPORT_DESC_* usage below).
 // ═══════════════════════════════════════════════════════════════════
 
-static const uint8_t s_hid_report_descriptor[] = {
+static const uint8_t s_hid_report_descriptor_keyboard[] = {
+    TUD_HID_REPORT_DESC_KEYBOARD(),
+};
 
-    // ╔══════════════════════════════════════════════════════════════╗
-    // ║                    MOUSE  (Report ID 1)                      ║
-    // ║  5 buttons, 16-bit X/Y, 8-bit wheel, 8-bit pan               ║
-    // ╚══════════════════════════════════════════════════════════════╝
-
-    HID_USAGE_PAGE ( HID_USAGE_PAGE_DESKTOP      ),
-    HID_USAGE      ( HID_USAGE_DESKTOP_MOUSE     ),
-    HID_COLLECTION ( HID_COLLECTION_APPLICATION   ),
-      HID_REPORT_ID( REPORT_ID_MOUSE              )
-
-      HID_USAGE      ( HID_USAGE_DESKTOP_POINTER  ),
-      HID_COLLECTION ( HID_COLLECTION_PHYSICAL     ),
-
-        // ── 5 mouse buttons ────────────────────────────────────────
-        HID_USAGE_PAGE  ( HID_USAGE_PAGE_BUTTON    ),
-        HID_USAGE_MIN   ( 1                         ),
-        HID_USAGE_MAX   ( 5                         ),
-        HID_LOGICAL_MIN ( 0                         ),
-        HID_LOGICAL_MAX ( 1                         ),
-        HID_REPORT_COUNT( 5                         ),
-        HID_REPORT_SIZE ( 1                         ),
-        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ),
-
-        // ── 3 padding bits to complete a byte ─────────────────────
-        HID_REPORT_COUNT( 1                         ),
-        HID_REPORT_SIZE ( 3                         ),
-        HID_INPUT       ( HID_CONSTANT              ),
-
-        // ── X, Y: 16-bit relative movement ───────────────────────
-        HID_USAGE_PAGE  ( HID_USAGE_PAGE_DESKTOP    ),
-        HID_USAGE       ( HID_USAGE_DESKTOP_X       ),
-        HID_USAGE       ( HID_USAGE_DESKTOP_Y       ),
-        HID_LOGICAL_MIN_N( -32767, 2                ),
-        HID_LOGICAL_MAX_N(  32767, 2                ),
-        HID_REPORT_SIZE ( 16                         ),
-        HID_REPORT_COUNT( 2                          ),
-        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
-
-        // ── Scroll pionowy (wheel): 8-bit ───────────────────────
-        HID_USAGE       ( HID_USAGE_DESKTOP_WHEEL   ),
-        HID_LOGICAL_MIN ( -127                       ),
-        HID_LOGICAL_MAX (  127                       ),
-        HID_REPORT_SIZE ( 8                          ),
-        HID_REPORT_COUNT( 1                          ),
-        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
-
-        // ── Scroll poziomy (AC Pan): 8-bit ──────────────────────
-        HID_USAGE_PAGE  ( HID_USAGE_PAGE_CONSUMER            ),
-        HID_USAGE_N     ( HID_USAGE_CONSUMER_AC_PAN, 2       ),
-        HID_LOGICAL_MIN ( -127                                ),
-        HID_LOGICAL_MAX (  127                                ),
-        HID_REPORT_SIZE ( 8                                   ),
-        HID_REPORT_COUNT( 1                                   ),
-        HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_RELATIVE ),
-
-      HID_COLLECTION_END,
-    HID_COLLECTION_END,
-
-    // ╔══════════════════════════════════════════════════════════════╗
-    // ║                 KEYBOARD  (Report ID 2)                      ║
-    // ║  8 modifiers, 6-key rollover, 5 LEDs                         ║
-    // ╚══════════════════════════════════════════════════════════════╝
-
-    HID_USAGE_PAGE ( HID_USAGE_PAGE_DESKTOP       ),
-    HID_USAGE      ( HID_USAGE_DESKTOP_KEYBOARD   ),
-    HID_COLLECTION ( HID_COLLECTION_APPLICATION    ),
-      HID_REPORT_ID( REPORT_ID_KEYBOARD            )
-
-      // ── 8 modifier bits (Ctrl/Shift/Alt/GUI × L+R) ───────
-      HID_USAGE_PAGE  ( HID_USAGE_PAGE_KEYBOARD    ),
-      HID_USAGE_MIN   ( 0xE0                       ),
-      HID_USAGE_MAX   ( 0xE7                       ),
-      HID_LOGICAL_MIN ( 0                           ),
-      HID_LOGICAL_MAX ( 1                           ),
-      HID_REPORT_SIZE ( 1                           ),
-      HID_REPORT_COUNT( 8                           ),
-      HID_INPUT       ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ),
-
-      // ── 1 reserved byte (required by spec) ────────────────────
-      HID_REPORT_SIZE ( 8                           ),
-      HID_REPORT_COUNT( 1                           ),
-      HID_INPUT       ( HID_CONSTANT                ),
-
-      // ── 5 LEDs (Num/Caps/Scroll Lock etc.) - OUTPUT from host ──
-      HID_USAGE_PAGE  ( HID_USAGE_PAGE_LED          ),
-      HID_USAGE_MIN   ( 1                           ),
-      HID_USAGE_MAX   ( 5                           ),
-      HID_REPORT_SIZE ( 1                           ),
-      HID_REPORT_COUNT( 5                           ),
-      HID_OUTPUT      ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE ),
-
-      // ── 3 padding bits for LEDs ────────────────────────────
-      HID_REPORT_SIZE ( 3                           ),
-      HID_REPORT_COUNT( 1                           ),
-      HID_OUTPUT      ( HID_CONSTANT                ),
-
-      // ── 6 keycodes (6-key rollover) ───────────────────────────
-      HID_USAGE_PAGE  ( HID_USAGE_PAGE_KEYBOARD     ),
-      HID_USAGE_MIN   ( 0                           ),
-      HID_USAGE_MAX_N ( 0xFF, 2                     ),
-      HID_LOGICAL_MIN ( 0                           ),
-      HID_LOGICAL_MAX_N( 0x00FF, 2                  ),
-      HID_REPORT_SIZE ( 8                           ),
-      HID_REPORT_COUNT( 6                           ),
-      HID_INPUT       ( HID_DATA | HID_ARRAY        ),
-
-    HID_COLLECTION_END,
-
-    // ╔══════════════════════════════════════════════════════════════╗
-    // ║              CONSUMER CONTROL  (Report ID 3)                 ║
-    // ║  1× 16-bit Usage ID (media, browser, etc.)                   ║
-    // ╚══════════════════════════════════════════════════════════════╝
-
-    TUD_HID_REPORT_DESC_CONSUMER( HID_REPORT_ID(REPORT_ID_CONSUMER) ),
+static const uint8_t s_hid_report_descriptor_mouse[] = {
+    TUD_HID_REPORT_DESC_MOUSE(),
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -149,19 +44,29 @@ tusb_desc_device_t s_device_descriptor = {
 //  CONFIGURATION DESCRIPTOR
 // ═══════════════════════════════════════════════════════════════════
 
-#define EPNUM_HID        0x81
-#define HID_EP_SIZE      16
-#define HID_POLL_INTERVAL 1
+#define EPNUM_HID_KEYBOARD 0x81
+#define EPNUM_HID_MOUSE    0x82
+#define HID_POLL_INTERVAL  1
 
-#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_HID_DESC_LEN)
 
 const uint8_t s_configuration_descriptor[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN,
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
                           TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
 
-    TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE,
-                       sizeof(s_hid_report_descriptor),
-                       EPNUM_HID, HID_EP_SIZE, HID_POLL_INTERVAL),
+    // Boot Keyboard interface - bInterfaceSubClass is set to Boot
+    // automatically by TUD_HID_DESCRIPTOR() because the protocol
+    // argument (HID_ITF_PROTOCOL_KEYBOARD) is non-zero.
+    TUD_HID_DESCRIPTOR(ITF_NUM_KEYBOARD, 0, HID_ITF_PROTOCOL_KEYBOARD,
+                       sizeof(s_hid_report_descriptor_keyboard),
+                       EPNUM_HID_KEYBOARD, sizeof(hid_keyboard_report_t),
+                       HID_POLL_INTERVAL),
+
+    // Boot Mouse interface
+    TUD_HID_DESCRIPTOR(ITF_NUM_MOUSE, 0, HID_ITF_PROTOCOL_MOUSE,
+                       sizeof(s_hid_report_descriptor_mouse),
+                       EPNUM_HID_MOUSE, sizeof(hid_mouse_report_t),
+                       HID_POLL_INTERVAL),
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -197,8 +102,11 @@ void usb_descriptors_init(void)
 // ═══════════════════════════════════════════════════════════════════
 
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {
-    (void)instance;
-    return s_hid_report_descriptor;
+    switch (instance) {
+        case ITF_NUM_KEYBOARD: return s_hid_report_descriptor_keyboard;
+        case ITF_NUM_MOUSE:    return s_hid_report_descriptor_mouse;
+        default:                return NULL;
+    }
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
@@ -212,8 +120,8 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                             hid_report_type_t report_type,
                             uint8_t const *buffer, uint16_t bufsize) {
-    (void)instance;
-    if (report_id == REPORT_ID_KEYBOARD && report_type == HID_REPORT_TYPE_OUTPUT) {
+    (void)report_id;
+    if (instance == ITF_NUM_KEYBOARD && report_type == HID_REPORT_TYPE_OUTPUT) {
         if (bufsize >= 1) {
             uint8_t leds = buffer[0];
             // leds: bit0=NumLock, bit1=CapsLock, bit2=ScrollLock
@@ -221,4 +129,12 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
             (void)leds;
         }
     }
+}
+
+// Invoked when the host switches Boot <-> Report protocol (SET_PROTOCOL).
+// No behavior change needed: both protocols use the same fixed report
+// layout (hid_keyboard_report_t / hid_mouse_report_t, no Report ID).
+void tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol) {
+    ESP_LOGI(TAG, "itf %u protocol -> %s", instance,
+             protocol == HID_PROTOCOL_BOOT ? "BOOT" : "REPORT");
 }

@@ -8,13 +8,13 @@
 #define CFG_TUD_ENDPOINT0_SIZE  64
 
 // Enabled device classes
-#define CFG_TUD_HID             1   // 1 instancja HID (composite via Report ID)
+#define CFG_TUD_HID             2   // 2 HID instances: Boot Keyboard (itf 0) + Boot Mouse (itf 1)
 #define CFG_TUD_CDC             0
 #define CFG_TUD_MSC             0
 #define CFG_TUD_MIDI            0
 #define CFG_TUD_VENDOR          0
 
-// HID endpoint buffer
-#define CFG_TUD_HID_EP_BUFSIZE  16  // >= max(mouse_report+1, kbd_report+1) = 9
+// HID endpoint buffer (>= largest report: hid_keyboard_report_t = 8 bytes)
+#define CFG_TUD_HID_EP_BUFSIZE  16
 
 #endif

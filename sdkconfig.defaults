@@ -2,7 +2,18 @@
 CONFIG_IDF_TARGET="esp32s3"
 
 # USB OTG (ESP32-S3 native USB)
-CONFIG_TINYUSB_HID_COUNT=1
+CONFIG_TINYUSB_HID_COUNT=2
+
+# Boards like Seeed XIAO ESP32S3 expose only a single USB-C port wired to
+# the native USB pins (GPIO19/20). Once TinyUSB claims that port as the
+# Boot Keyboard/Mouse device, it can no longer also serve as a USB-Serial-
+# JTAG console. Route the console to UART0 instead (XIAO silkscreen D6/D7 =
+# GPIO43/44 = default UART0 TX/RX) so logs stay available via an external
+# USB-UART adapter. Flashing is unaffected - it uses the ROM bootloader's
+# own download-mode driver on the same port, independent of this setting.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM=0
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
