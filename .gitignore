@@ -32,6 +32,9 @@ flasher_args.json # Generated in build directory
 sdkconfig.old
 sdkconfig
 
+# Local WiFi credentials (see main/wifi_credentials.h.example)
+main/wifi_credentials.h
+
 # ESP-IDF dependencies
 # For older versions or manual component management
 /components/.idf/

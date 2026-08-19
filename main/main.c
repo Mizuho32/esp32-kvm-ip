@@ -12,6 +12,7 @@
 #include "network_task.h"
 #include "protocol.h"
 #include "usb_descriptors.h"
+#include "wifi_credentials.h"
 #include "wifi_manager.h"
 
 #define TAG "MAIN"
@@ -32,7 +33,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "NVS initialized");
 
     // 2. Connect WiFi (blocks until IP obtained or retries exhausted)
-    esp_err_t wifi_ret = wifi_manager_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
+    esp_err_t wifi_ret = wifi_manager_init(WIFI_SSID, WIFI_PASSWORD);
     if (wifi_ret != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connection failed (0x%x). Restarting in 5s...", wifi_ret);
         vTaskDelay(pdMS_TO_TICKS(5000));

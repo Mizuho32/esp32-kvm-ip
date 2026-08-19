@@ -66,11 +66,12 @@ The Target PC sees a regular USB keyboard and mouse, no drivers or software requ
 
 3. Configure WiFi SSID and password:
    ```
-   idf.py menuconfig
+   cp main/wifi_credentials.h.example main/wifi_credentials.h
    ```
-   Navigate to **WiFi Configuration** and set:
-   - `WiFi SSID` – network name
-   - `WiFi Password` – WPA2 password
+   Edit `main/wifi_credentials.h` and set `WIFI_SSID` / `WIFI_PASSWORD`.
+   This file is gitignored (kept out of the repo) and, unlike a Kconfig
+   value, editing it only recompiles the couple of files that include it
+   instead of the whole project.
 
 4. Build and flash:
    ```
@@ -162,11 +163,12 @@ esp32-kvm-ip/
 ├── sdkconfig.defaults
 ├── main/
 │   ├── main.c                 # Initialization: NVS, WiFi, TinyUSB, task creation
-│   ├── Kconfig.projbuild      # WiFi SSID/password config (menuconfig)
+│   ├── Kconfig.projbuild      # USB descriptor strings config (menuconfig)
 │   ├── tusb_config.h          # TinyUSB configuration
 │   ├── usb_descriptors.c/h    # USB HID descriptors + callbacks
 │   ├── protocol.h             # UDP packet structures + event types
 │   ├── wifi_manager.c/h       # WiFi STA initialization
+│   ├── wifi_credentials.h.example  # Copy to wifi_credentials.h (gitignored) and edit
 │   ├── network_task.c/h       # UDP receive → xQueue
 │   └── hid_task.c/h           # xQueue → USB HID reports
 └── server/
