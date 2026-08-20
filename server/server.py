@@ -1,21 +1,34 @@
 """
-ESP32-S3 KVM - Server (Windows)
+ESP32-S3 KVM - Server (Windows + Linux)
 
-Captures keyboard events (LL Hook) and mouse events (Raw Input + LL Hook)
-and sends them as UDP packets to ESP32-S3.
+Captures keyboard/mouse input and sends it as UDP packets to ESP32-S3.
+
+Windows: keyboard + mouse, via WinAPI low-level hooks + Raw Input
+         (winapi_hooks.py).
+Linux:   keyboard only for now, via evdev + EVIOCGRAB (evdev_hooks.py).
+         See mds/2026-08-20_server.md for why mouse isn't ported yet.
+         Requires the running user to be in the 'input' group.
 
 Usage:
     python server.py --host <ESP32_IP> [--port 4210] [--rate 125]
 """
 
 import argparse
+import platform
 import sys
 import threading
 
 from protocol import UDP_PORT
 from state import InputState
 from udp_sender import sender_thread
-from winapi_hooks import InputHookManager
+
+if platform.system() == "Windows":
+    from winapi_hooks import InputHookManager
+elif platform.system() == "Linux":
+    from evdev_hooks import InputHookManager
+else:
+    print(f"ERROR: Unsupported platform: {platform.system()}", file=sys.stderr)
+    sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -45,7 +58,7 @@ def main():
     )
     sender.start()
 
-    print("[INIT] Installing WinAPI hooks...")
+    print(f"[INIT] Installing input hooks ({platform.system()})...")
     hook_manager = InputHookManager(state)
     try:
         hook_manager.start()

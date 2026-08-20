@@ -1,14 +1,13 @@
 """
 Clipboard text paste support for ESP32-S3 KVM.
 
-Reads Windows clipboard and converts text characters to HID keystroke
+Reads the OS clipboard and converts text characters to HID keystroke
 sequences (US keyboard layout).
 
 Characters outside the supported set are silently skipped.
 """
 
-import ctypes
-import ctypes.wintypes as wintypes
+import platform
 
 # ═══════════════════════════════════════════════════════════════════
 #  Character → HID Keycode Mapping (US Layout)
@@ -110,45 +109,80 @@ def text_to_keystrokes(text: str) -> list[tuple[int, int]]:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  Windows Clipboard Access
-# ═══════════════════════════════════════════════════════════════════
+if platform.system() == "Windows":
+    # ═══════════════════════════════════════════════════════════════
+    #  Windows Clipboard Access
+    # ═══════════════════════════════════════════════════════════════
 
-CF_UNICODETEXT = 13
+    import ctypes
+    import ctypes.wintypes as wintypes
 
-_user32 = ctypes.windll.user32
-_kernel32 = ctypes.windll.kernel32
+    CF_UNICODETEXT = 13
 
-_user32.OpenClipboard.argtypes = [wintypes.HWND]
-_user32.OpenClipboard.restype = wintypes.BOOL
-_user32.GetClipboardData.argtypes = [wintypes.UINT]
-_user32.GetClipboardData.restype = wintypes.HANDLE
-_user32.CloseClipboard.argtypes = []
-_user32.CloseClipboard.restype = wintypes.BOOL
+    _user32 = ctypes.windll.user32
+    _kernel32 = ctypes.windll.kernel32
 
-_kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
-_kernel32.GlobalLock.restype = ctypes.c_void_p
-_kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
-_kernel32.GlobalUnlock.restype = wintypes.BOOL
+    _user32.OpenClipboard.argtypes = [wintypes.HWND]
+    _user32.OpenClipboard.restype = wintypes.BOOL
+    _user32.GetClipboardData.argtypes = [wintypes.UINT]
+    _user32.GetClipboardData.restype = wintypes.HANDLE
+    _user32.CloseClipboard.argtypes = []
+    _user32.CloseClipboard.restype = wintypes.BOOL
 
+    _kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+    _kernel32.GlobalLock.restype = ctypes.c_void_p
+    _kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+    _kernel32.GlobalUnlock.restype = wintypes.BOOL
 
-def read_clipboard_text() -> str | None:
-    """Read Unicode text from the Windows clipboard.
+    def read_clipboard_text() -> str | None:
+        """Read Unicode text from the Windows clipboard.
 
-    Returns None if the clipboard doesn't contain text or can't be opened.
-    """
-    if not _user32.OpenClipboard(None):
-        return None
-    try:
-        handle = _user32.GetClipboardData(CF_UNICODETEXT)
-        if not handle:
-            return None
-        ptr = _kernel32.GlobalLock(handle)
-        if not ptr:
+        Returns None if the clipboard doesn't contain text or can't be opened.
+        """
+        if not _user32.OpenClipboard(None):
             return None
         try:
-            return ctypes.wstring_at(ptr)
+            handle = _user32.GetClipboardData(CF_UNICODETEXT)
+            if not handle:
+                return None
+            ptr = _kernel32.GlobalLock(handle)
+            if not ptr:
+                return None
+            try:
+                return ctypes.wstring_at(ptr)
+            finally:
+                _kernel32.GlobalUnlock(handle)
         finally:
-            _kernel32.GlobalUnlock(handle)
-    finally:
-        _user32.CloseClipboard()
+            _user32.CloseClipboard()
+
+elif platform.system() == "Linux":
+    # ═══════════════════════════════════════════════════════════════
+    #  Linux Clipboard Access (wl-clipboard on Wayland, xclip/xsel on X11)
+    # ═══════════════════════════════════════════════════════════════
+
+    import subprocess
+
+    _CLIPBOARD_COMMANDS = [
+        ["wl-paste", "--no-newline"],
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["xsel", "--clipboard", "--output"],
+    ]
+
+    def read_clipboard_text() -> str | None:
+        """Read text from the Linux clipboard.
+
+        Tries wl-paste (Wayland), then xclip/xsel (X11). Returns None if
+        none of them are installed or the clipboard has no text.
+        """
+        for cmd in _CLIPBOARD_COMMANDS:
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=2)
+            except FileNotFoundError:
+                continue
+            if result.returncode == 0:
+                return result.stdout.decode("utf-8", errors="replace")
+        return None
+
+else:
+    def read_clipboard_text() -> str | None:
+        return None

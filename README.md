@@ -50,7 +50,7 @@ The Target PC sees a regular USB keyboard and mouse, no drivers or software requ
 | Component | Requirements |
 |---|---|
 | **ESP32 Firmware** | ESP-IDF v5.x, components: `esp_tinyusb`, `tinyusb` (fetched automatically) |
-| **Server (Host PC)** | Python 3.10+, Windows (WinAPI hooks + Raw Input via ctypes, no external dependencies) |
+| **Server (Host PC)** | Python 3.10+. Windows: no external dependencies (WinAPI hooks + Raw Input via ctypes). Linux: `pip install -r server/requirements-linux.txt` (keyboard only — see below) |
 
 ## Installation
 
@@ -92,12 +92,33 @@ The Target PC sees a regular USB keyboard and mouse, no drivers or software requ
 
 ### Server (Host PC)
 
-The server has no external dependencies, it uses only the Python standard library.
+**Windows**: no external dependencies, uses only the Python standard library.
 
 ```
 cd server
 python server.py --host <ESP32_IP>
 ```
+
+**Linux**: keyboard-only for now (mouse capture isn't ported yet — the
+Windows-only WinAPI hooks don't apply). Uses `evdev` + `EVIOCGRAB`, so it works under X11 or Wayland (any
+desktop environment, including Wayland/KDE Plasma) since evdev sits below
+the display server.
+
+```
+cd server
+pip install -r requirements-linux.txt
+python server.py --host <ESP32_IP>
+```
+
+Requires read/write access to `/dev/input/event*`:
+
+```
+sudo usermod -aG input $USER   # then log out and back in
+```
+
+Clipboard paste (Shift+Insert) needs `wl-paste` (wl-clipboard, Wayland) or
+`xclip`/`xsel` (X11) installed; without any of them, paste silently does
+nothing.
 
 ## Usage
 
@@ -113,6 +134,8 @@ that doesn't require a serial monitor.
 3. Press **Scroll Lock** to toggle KVM mode:
    - **KVM OFF** (default) – keyboard and mouse work normally on Host PC
    - **KVM ON** – input is blocked on Host PC and forwarded to Target PC
+     (Linux: keyboard only — the mouse is never captured, so it keeps
+     working normally on the Host PC even while KVM is on)
 
 ### Clipboard Paste
 
@@ -188,10 +211,16 @@ esp32-kvm-ip/
 │   ├── network_task.c/h       # UDP receive → xQueue
 │   └── hid_task.c/h           # xQueue → USB HID reports
 └── server/
-    ├── server.py              # Server: WinAPI hooks, Raw Input, UDP sender
-    ├── clipboard_typer.py     # Clipboard paste: text → HID keystroke sequences
-    ├── hid_keymap.py          # VK_* → HID Usage ID mapping (150+ keys)
-    └── protocol.py            # UDP packet packing
+    ├── server.py              # Entry point: picks the input backend for the OS
+    ├── state.py               # Shared thread-safe input state
+    ├── udp_sender.py          # State → UDP packets at a fixed rate
+    ├── protocol.py            # UDP packet packing
+    ├── winapi_hooks.py        # Windows: LL hooks + Raw Input (keyboard + mouse)
+    ├── hid_keymap.py          # Windows: VK_* → HID Usage ID mapping
+    ├── evdev_hooks.py         # Linux: evdev + EVIOCGRAB (keyboard only)
+    ├── evdev_keymap.py        # Linux: KEY_* → HID Usage ID mapping
+    ├── requirements-linux.txt # Linux: pip dependencies (evdev)
+    └── clipboard_typer.py     # Clipboard paste: text → HID keystroke sequences
 ```
 
 ## License
