@@ -158,13 +158,18 @@ static esp_err_t wifi_fallback_connect(wifi_config_t *wifi_config)
 
 // ── Public API ───────────────────────────────────────────────────
 
-esp_err_t wifi_manager_init(const char *ssid, const char *password)
+esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *hostname)
 {
     wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     s_sta_netif = esp_netif_create_default_wifi_sta();
+
+    esp_err_t hostname_err = esp_netif_set_hostname(s_sta_netif, hostname);
+    if (hostname_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set hostname '%s': %s", hostname, esp_err_to_name(hostname_err));
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));

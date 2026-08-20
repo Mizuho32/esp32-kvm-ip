@@ -5,6 +5,7 @@ idf_component_register(
         "wifi_manager.c"
         "network_task.c"
         "hid_task.c"
+        "status_led.c"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         nvs_flash
@@ -12,4 +13,5 @@ idf_component_register(
         esp_netif
         esp_event
         lwip
+        esp_driver_gpio
 )

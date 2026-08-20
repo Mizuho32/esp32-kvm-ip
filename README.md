@@ -68,10 +68,15 @@ The Target PC sees a regular USB keyboard and mouse, no drivers or software requ
    ```
    cp main/wifi_credentials.h.example main/wifi_credentials.h
    ```
-   Edit `main/wifi_credentials.h` and set `WIFI_SSID` / `WIFI_PASSWORD`.
-   This file is gitignored (kept out of the repo) and, unlike a Kconfig
-   value, editing it only recompiles the couple of files that include it
-   instead of the whole project.
+   Edit `main/wifi_credentials.h` and set `WIFI_SSID` / `WIFI_PASSWORD` /
+   `WIFI_HOSTNAME`. This file is gitignored (kept out of the repo) and,
+   unlike a Kconfig value, editing it only recompiles the couple of files
+   that include it instead of the whole project.
+
+   `WIFI_HOSTNAME` is sent to the DHCP server (option 12), so the device
+   shows up under that name in your router's DHCP lease list instead of
+   just an IP address — useful for finding the ESP32's IP on routers like
+   OpenWRT without a static lease.
 
 4. Build and flash:
    ```
@@ -95,6 +100,10 @@ python server.py --host <ESP32_IP>
 ```
 
 ## Usage
+
+The onboard user LED (GPIO21 on XIAO ESP32S3) turns on once WiFi is
+connected and an IP address has been obtained, as a visual "ready" signal
+that doesn't require a serial monitor.
 
 1. Connect the ESP32-S3 via USB to the **Target PC** (USB OTG port)
 2. Run the server on the **Host PC**:
@@ -175,6 +184,7 @@ esp32-kvm-ip/
 │   ├── protocol.h             # UDP packet structures + event types
 │   ├── wifi_manager.c/h       # WiFi STA initialization
 │   ├── wifi_credentials.h.example  # Copy to wifi_credentials.h (gitignored) and edit
+│   ├── status_led.c/h         # Onboard LED (on once WiFi is up)
 │   ├── network_task.c/h       # UDP receive → xQueue
 │   └── hid_task.c/h           # xQueue → USB HID reports
 └── server/

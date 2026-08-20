@@ -20,8 +20,11 @@ extern EventGroupHandle_t wifi_event_group;
  * Blocks until an IP address is obtained.
  * WiFi will auto-reconnect indefinitely on disconnect.
  *
+ * @param hostname Sent to the DHCP server (option 12) and used as the
+ *                 netif's mDNS-less hostname, so the device can be found
+ *                 by name in the router's DHCP lease list.
  * @return ESP_OK if connected, ESP_FAIL on failure
  */
-esp_err_t wifi_manager_init(const char *ssid, const char *password);
+esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *hostname);
 
 #endif

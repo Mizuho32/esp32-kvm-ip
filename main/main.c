@@ -11,6 +11,7 @@
 #include "hid_task.h"
 #include "network_task.h"
 #include "protocol.h"
+#include "status_led.h"
 #include "usb_descriptors.h"
 #include "wifi_credentials.h"
 #include "wifi_manager.h"
@@ -21,6 +22,8 @@ QueueHandle_t hid_event_queue;
 
 void app_main(void) {
     ESP_LOGI(TAG, "ESP32-S3 KVM starting...");
+
+    status_led_init();
 
     // 1. Initialize NVS (required by WiFi)
     esp_err_t ret = nvs_flash_init();
@@ -33,7 +36,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "NVS initialized");
 
     // 2. Connect WiFi (blocks until IP obtained or retries exhausted)
-    esp_err_t wifi_ret = wifi_manager_init(WIFI_SSID, WIFI_PASSWORD);
+    esp_err_t wifi_ret = wifi_manager_init(WIFI_SSID, WIFI_PASSWORD, WIFI_HOSTNAME);
     if (wifi_ret != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connection failed (0x%x). Restarting in 5s...", wifi_ret);
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -74,5 +77,6 @@ void app_main(void) {
     xRet = xTaskCreatePinnedToCore(hid_task, "hid_task", 4096, NULL, 6, NULL, 1);
     configASSERT(xRet == pdPASS);
 
+    status_led_set(true);
     ESP_LOGI(TAG, "System ready - listening for UDP on port %d", UDP_PORT);
 }
