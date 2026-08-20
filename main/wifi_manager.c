@@ -14,10 +14,17 @@
 #define NVS_NAMESPACE        "wifi_cache"
 #define FAST_CONNECT_TIMEOUT_MS  10000
 
+// Some old/cheap 802.11n APs have interop bugs that make the ESP32 fail
+// basic 802.11 authentication (reason 2/205, before WPA is even involved).
+// After this many consecutive failures, drop to 802.11b/g-only, which
+// sidesteps the AP's 11n code path entirely.
+#define PROTOCOL_FALLBACK_RETRY_COUNT 5
+
 EventGroupHandle_t wifi_event_group;
 static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
 static bool s_fast_connect = false;
+static bool s_protocol_downgraded = false;
 
 // ── NVS helpers ──────────────────────────────────────────────────
 
@@ -89,12 +96,23 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
         xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
         xEventGroupSetBits(wifi_event_group, WIFI_DISCONNECTED_BIT);
         s_retry_num++;
         int delay_ms = (s_retry_num < 10) ? (s_retry_num * 1000) : 10000;
-        ESP_LOGW(TAG, "Disconnected. Reconnecting in %d ms (attempt %d)...",
-                 delay_ms, s_retry_num);
+        ESP_LOGW(TAG, "Disconnected (reason %d). Reconnecting in %d ms (attempt %d)...",
+                 disc->reason, delay_ms, s_retry_num);
+
+        if (!s_protocol_downgraded && s_retry_num >= PROTOCOL_FALLBACK_RETRY_COUNT) {
+            s_protocol_downgraded = true;
+            ESP_LOGW(TAG, "Repeated connection failures, falling back to 802.11b/g only");
+            esp_err_t err = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to set 802.11b/g-only protocol: %s", esp_err_to_name(err));
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -182,7 +200,14 @@ esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *
     wifi_config_t wifi_config = { 0 };
     strlcpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
     strlcpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
+    // threshold.authmode is a *minimum* security requirement, not an exact
+    // match - WIFI_AUTH_WPA2_WPA3_PSK (the original value here) rejects
+    // anything below WPA2/WPA3-transition pre-connection with reason 211
+    // (NO_AP_FOUND_IN_AUTHMODE_THRESHOLD). This deployment's AP is an old
+    // WPA1-only (WiFi 4) router, so the threshold must be lowered to
+    // WPA_PSK to accept it (still accepts WPA2/WPA3 APs too, since those
+    // rank higher in wifi_auth_mode_t).
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
     wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 
     // Try fast reconnect using cached BSSID + channel + static IP
