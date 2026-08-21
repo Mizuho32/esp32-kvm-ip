@@ -1,3 +1,9 @@
 dependencies:
   espressif/esp_tinyusb: '*'
   espressif/tinyusb: '*'
+  # Host role only (KVM_ROLE=HOST) - USB Host HID class driver.
+  # Manifest deps are always compiled in regardless of KVM_ROLE (the
+  # component manager adds them to main's REQUIRES unconditionally), but
+  # nothing in the Device role calls into it, so it's dead weight rather
+  # than a functional conflict.
+  espressif/usb_host_hid: '*'

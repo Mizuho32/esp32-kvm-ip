@@ -18,3 +18,7 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # FreeRTOS
 CONFIG_FREERTOS_HZ=1000
 CONFIG_FREERTOS_UNICORE=n
+
+# USB Host (Host role only, KVM_ROLE=HOST) - enables Hub-connected devices.
+# Harmless when unused (Device role never installs the USB Host driver).
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
