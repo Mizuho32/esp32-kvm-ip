@@ -19,9 +19,17 @@
 #include "usb/hid_usage_mouse.h"
 
 #include "protocol.h"
-#include "filter_rules.h"
 #include "hid_report_parser.h"
 #include "wifi_credentials.h"
+
+// filter_rules.h is a gitignored personal copy of filter_rules.h.example
+// (like wifi_credentials.h) - fall back to the tracked, pure-passthrough
+// default if it hasn't been created.
+#if __has_include("filter_rules.h")
+#include "filter_rules.h"
+#else
+#include "filter_rules_default.h"
+#endif
 
 #define TAG "USBHOST"
 

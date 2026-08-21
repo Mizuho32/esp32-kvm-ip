@@ -8,22 +8,25 @@
 
 // Host role only (KVM_ROLE=HOST).
 //
-// Filter/conversion hook, applied to every report read from a physical
-// USB HID device, right before usb_host_task.c packs it into the same
-// UDP protocol server.py/protocol.h uses. Edit these functions directly
-// to add rules - see mds/2026-08-21_filter_conv_route.md for the design
-// rationale and mds/2026-08-21_host_report_protocol.md for how Report
-// vs Boot Protocol selection works on this (Host) side.
+// Copy this file to filter_rules.h and edit it - filter_rules.h is
+// gitignored (like wifi_credentials.h), since rules are a personal
+// customization, not something a fresh checkout should apply by
+// default. usb_host_task.c includes filter_rules.h if present, falling
+// back to filter_rules_default.h (pure passthrough) otherwise.
+//
+// Applied to every report read from a physical USB HID device, right
+// before usb_host_task.c packs it into the same UDP protocol
+// server.py/protocol.h uses - see mds/2026-08-21_filter_conv_route.md
+// for the design rationale and mds/2026-08-21_host_report_protocol.md
+// for how Report vs Boot Protocol selection works on this (Host) side.
 //
 // Keyboards stay on Boot Protocol (modifiers + up to 6 keycodes - see
 // hid_usage_keyboard.h). Mice use Report Protocol when the connected
 // device's HID Report Descriptor parses cleanly (giving wheel/pan/extra
 // buttons), falling back to Boot Protocol (buttons 1-3 + dx/dy only)
-// otherwise - see usb_host_task.c's handle_driver_connected(). Both
-// functions start as pure passthrough by default (return true);
-// filter_mouse_report() below has the wheel-drop and back/forward ->
-// Alt+arrow rules actually enabled, since those were the motivating
-// examples for this whole file.
+// otherwise - see usb_host_task.c's handle_driver_connected(). Below:
+// the back/forward -> Alt+arrow rule is enabled; wheel-drop is written
+// but commented out (uncomment to enable) - edit freely, this is your copy.
 
 /**
  * Called for every keyboard Boot Protocol report.
@@ -90,7 +93,7 @@ static inline bool filter_mouse_report(uint8_t *buttons, int16_t *dx, int16_t *d
                                        uint8_t *synth_modifiers, uint8_t *synth_keycode)
 {
     // Drop the wheel entirely.
-    *wheel = 0;
+    // *wheel = 0;
 
     // Back (button 4, bit 3) -> Alt+Left, Forward (button 5, bit 4) ->
     // Alt+Right (browser-style back/forward navigation). Cleared from

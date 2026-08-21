@@ -36,6 +36,9 @@ sdkconfig
 # Local WiFi credentials (see main/wifi_credentials.h.example)
 main/wifi_credentials.h
 
+# Local filter/conv rules (see main/filter_rules.h.example)
+main/filter_rules.h
+
 # ESP-IDF dependencies
 # For older versions or manual component management
 /components/.idf/
