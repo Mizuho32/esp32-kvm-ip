@@ -20,6 +20,7 @@
 
 #include "protocol.h"
 #include "filter_rules.h"
+#include "hid_report_parser.h"
 #include "wifi_credentials.h"
 
 #define TAG "USBHOST"
@@ -35,6 +36,69 @@ static QueueHandle_t s_driver_event_queue;
 static int s_sock = -1;
 static struct sockaddr_in s_target_addr;
 static uint32_t s_seq;
+
+// Merged keyboard state: physical keyboard (handle_keyboard_report) and
+// mouse-triggered synthetic keys (e.g. back/forward -> Alt+arrow, see
+// filter_rules.h) both contribute to one combined report, the same way
+// server.py's InputState merges keyboard + paste-typing on the Windows
+// side. Without this, whichever source sent last would silently
+// overwrite the other's held keys (the UDP protocol carries full state,
+// not deltas).
+static uint8_t s_kbd_modifiers;
+static uint8_t s_kbd_keycodes[6];
+static uint8_t s_synth_modifiers;
+static uint8_t s_synth_keycode = HID_KEY_NO_PRESS;
+
+// Per-device Report Protocol layout, for mice whose HID Report
+// Descriptor parsed cleanly (see mds/2026-08-21_host_report_protocol.md).
+// Devices that don't parse (or aren't Boot Interface subclass, so no
+// fallback exists) are simply not tracked here and their reports ignored.
+#define MAX_MOUSE_DEVICES 4
+typedef struct {
+    hid_host_device_handle_t handle;
+    bool                     use_report_protocol;
+    mouse_report_layout_t    layout;
+} mouse_device_state_t;
+static mouse_device_state_t s_mouse_devices[MAX_MOUSE_DEVICES];
+static int s_mouse_device_count;
+
+static mouse_device_state_t *find_mouse_device(hid_host_device_handle_t handle)
+{
+    for (int i = 0; i < s_mouse_device_count; i++) {
+        if (s_mouse_devices[i].handle == handle) {
+            return &s_mouse_devices[i];
+        }
+    }
+    return NULL;
+}
+
+static mouse_device_state_t *register_mouse_device(hid_host_device_handle_t handle)
+{
+    if (s_mouse_device_count >= MAX_MOUSE_DEVICES) {
+        return NULL;
+    }
+    mouse_device_state_t *d = &s_mouse_devices[s_mouse_device_count++];
+    memset(d, 0, sizeof(*d));
+    d->handle = handle;
+    return d;
+}
+
+static void unregister_mouse_device(hid_host_device_handle_t handle)
+{
+    for (int i = 0; i < s_mouse_device_count; i++) {
+        if (s_mouse_devices[i].handle == handle) {
+            s_mouse_devices[i] = s_mouse_devices[--s_mouse_device_count];
+            return;
+        }
+    }
+}
+
+static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
 
 static bool resolve_target(void)
 {
@@ -77,7 +141,7 @@ static void send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6])
     send_udp_packet(&pkt);
 }
 
-static void send_mouse_report(uint8_t buttons, int8_t dx, int8_t dy)
+static void send_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
 {
     udp_packet_t pkt = {
         .magic    = PACKET_MAGIC,
@@ -87,9 +151,46 @@ static void send_mouse_report(uint8_t buttons, int8_t dx, int8_t dy)
     pkt.mouse.buttons = buttons;
     pkt.mouse.dx      = dx;
     pkt.mouse.dy      = dy;
-    pkt.mouse.wheel   = 0; // Boot Protocol mice don't report wheel/pan.
-    pkt.mouse.pan     = 0;
+    pkt.mouse.wheel   = wheel;
+    pkt.mouse.pan     = pan;
     send_udp_packet(&pkt);
+}
+
+static void send_merged_keyboard_report(void)
+{
+    uint8_t modifiers = s_kbd_modifiers | s_synth_modifiers;
+    uint8_t keycodes[6];
+    memcpy(keycodes, s_kbd_keycodes, 6);
+
+    if (s_synth_keycode != HID_KEY_NO_PRESS) {
+        bool already_present = false;
+        for (int i = 0; i < 6; i++) {
+            if (keycodes[i] == s_synth_keycode) {
+                already_present = true;
+                break;
+            }
+        }
+        if (!already_present) {
+            for (int i = 0; i < 6; i++) {
+                if (keycodes[i] == HID_KEY_NO_PRESS) {
+                    keycodes[i] = s_synth_keycode;
+                    break;
+                }
+            }
+        }
+    }
+
+    send_keyboard_report(modifiers, keycodes);
+}
+
+static void apply_mouse_synth_keys(uint8_t modifiers, uint8_t keycode)
+{
+    if (modifiers == s_synth_modifiers && keycode == s_synth_keycode) {
+        return; // No change - avoid a redundant packet on every mouse report.
+    }
+    s_synth_modifiers = modifiers;
+    s_synth_keycode   = keycode;
+    send_merged_keyboard_report();
 }
 
 static void handle_keyboard_report(const uint8_t *data, size_t length)
@@ -104,24 +205,56 @@ static void handle_keyboard_report(const uint8_t *data, size_t length)
     memcpy(keycodes, report->key, sizeof(keycodes));
 
     if (filter_keyboard_report(&modifiers, keycodes)) {
-        send_keyboard_report(modifiers, keycodes);
+        s_kbd_modifiers = modifiers;
+        memcpy(s_kbd_keycodes, keycodes, 6);
+        send_merged_keyboard_report();
     }
 }
 
-static void handle_mouse_report(const uint8_t *data, size_t length)
+// Runs a fully-decoded mouse sample (buttons/dx/dy/wheel/pan, regardless
+// of whether it came from Report or Boot Protocol) through filter_rules.h
+// and sends it on.
+static void process_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
+{
+    uint8_t synth_modifiers = 0;
+    uint8_t synth_keycode = HID_KEY_NO_PRESS;
+
+    if (filter_mouse_report(&buttons, &dx, &dy, &wheel, &pan, &synth_modifiers, &synth_keycode)) {
+        send_mouse_report(buttons, dx, dy, wheel, pan);
+    }
+    apply_mouse_synth_keys(synth_modifiers, synth_keycode);
+}
+
+static void handle_mouse_report_boot(const uint8_t *data, size_t length)
 {
     if (length < sizeof(hid_mouse_input_report_boot_t)) {
         return;
     }
     const hid_mouse_input_report_boot_t *report = (const hid_mouse_input_report_boot_t *)data;
+    // Boot Protocol mice don't report wheel/pan/buttons 4+ - see
+    // mds/2026-08-21_host_report_protocol.md.
+    process_mouse_sample(report->buttons.val, report->x_displacement, report->y_displacement, 0, 0);
+}
 
-    uint8_t buttons = report->buttons.val;
-    int8_t dx = report->x_displacement;
-    int8_t dy = report->y_displacement;
-
-    if (filter_mouse_report(&buttons, &dx, &dy)) {
-        send_mouse_report(buttons, dx, dy);
+static void handle_mouse_report_generic(const mouse_report_layout_t *layout, const uint8_t *data, size_t length)
+{
+    uint8_t buttons = 0;
+    for (uint8_t i = 0; i < layout->button_count && i < HID_MAX_BUTTONS; i++) {
+        if (hid_extract_field(data, length, &layout->buttons[i]) != 0) {
+            buttons |= (uint8_t)(1u << i);
+        }
     }
+
+    int16_t dx = (int16_t)clamp_i32(hid_extract_field(data, length, &layout->x), INT16_MIN, INT16_MAX);
+    int16_t dy = (int16_t)clamp_i32(hid_extract_field(data, length, &layout->y), INT16_MIN, INT16_MAX);
+    int8_t wheel = layout->wheel.present
+                       ? (int8_t)clamp_i32(hid_extract_field(data, length, &layout->wheel), INT8_MIN, INT8_MAX)
+                       : 0;
+    int8_t pan = layout->pan.present
+                     ? (int8_t)clamp_i32(hid_extract_field(data, length, &layout->pan), INT8_MIN, INT8_MAX)
+                     : 0;
+
+    process_mouse_sample(buttons, dx, dy, wheel, pan);
 }
 
 static void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
@@ -141,19 +274,24 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
             if (hid_host_device_get_raw_input_report_data(hid_device_handle, data, sizeof(data), &data_length) != ESP_OK) {
                 return;
             }
-            if (dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
-                if (dev_params.proto == HID_PROTOCOL_KEYBOARD) {
-                    handle_keyboard_report(data, data_length);
-                } else if (dev_params.proto == HID_PROTOCOL_MOUSE) {
-                    handle_mouse_report(data, data_length);
+            if (dev_params.proto == HID_PROTOCOL_KEYBOARD &&
+                dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
+                handle_keyboard_report(data, data_length);
+            } else if (dev_params.proto == HID_PROTOCOL_MOUSE) {
+                mouse_device_state_t *dev = find_mouse_device(hid_device_handle);
+                if (dev && dev->use_report_protocol) {
+                    handle_mouse_report_generic(&dev->layout, data, data_length);
+                } else if (dev && dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
+                    handle_mouse_report_boot(data, data_length);
                 }
             }
-            // Non-boot ("generic") HID devices are ignored for now - see
-            // mds/2026-08-21_usb_host.md.
+            // Non-boot-interface keyboards and unparseable non-boot-interface
+            // mice are ignored - see mds/2026-08-21_host_report_protocol.md.
             break;
         }
         case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "HID device disconnected (proto %d)", dev_params.proto);
+            unregister_mouse_device(hid_device_handle);
             hid_host_device_close(hid_device_handle);
             break;
         case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
@@ -179,18 +317,47 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         return;
     }
 
-    if (dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
-        // Force Boot Protocol so reports are the fixed, well-known layout
-        // (hid_keyboard_input_report_boot_t / hid_mouse_input_report_boot_t)
-        // instead of a device-specific Report Protocol we'd have to parse
-        // against the HID report descriptor ourselves.
-        hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_BOOT);
-        if (dev_params.proto == HID_PROTOCOL_KEYBOARD) {
-            hid_class_request_set_idle(hid_device_handle, 0, 0);
+    bool supports_boot = (dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE);
+
+    if (dev_params.proto == HID_PROTOCOL_MOUSE) {
+        // Always try Report Protocol first - it's the only way to get
+        // wheel/pan/extra buttons, regardless of Boot Interface support
+        // (Report Protocol works on any HID mouse; Boot Protocol is only
+        // an optional, standardized fallback some mice also support).
+        mouse_device_state_t *dev = register_mouse_device(hid_device_handle);
+        bool parsed_ok = false;
+
+        size_t desc_len = 0;
+        uint8_t *desc = hid_host_get_report_descriptor(hid_device_handle, &desc_len);
+        if (dev && desc && desc_len > 0) {
+            hid_parse_mouse_report_descriptor(desc, desc_len, &dev->layout);
+            parsed_ok = dev->layout.x.present && dev->layout.y.present;
         }
-        ESP_LOGI(TAG, "HID device connected (proto %d)", dev_params.proto);
+
+        if (parsed_ok) {
+            hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_REPORT);
+            dev->use_report_protocol = true;
+            ESP_LOGI(TAG, "Mouse connected: Report Protocol (buttons=%d wheel=%d pan=%d)",
+                     dev->layout.button_count, dev->layout.wheel.present, dev->layout.pan.present);
+        } else if (supports_boot) {
+            hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_BOOT);
+            if (dev) {
+                dev->use_report_protocol = false;
+            }
+            ESP_LOGW(TAG, "Mouse connected: Report Protocol descriptor unparseable, falling back to Boot Protocol (no wheel/pan/extra buttons)");
+        } else {
+            ESP_LOGE(TAG, "Mouse connected: Report Protocol descriptor unparseable and no Boot Protocol support - ignoring");
+        }
+    } else if (dev_params.proto == HID_PROTOCOL_KEYBOARD && supports_boot) {
+        // Keyboards stay on Boot Protocol - modifiers + 6-key rollover is
+        // already everything filter_rules.h can see/remap, and adding a
+        // second generic report parser (keyboard usages, not just mouse)
+        // isn't needed for what's actually in scope right now.
+        hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_BOOT);
+        hid_class_request_set_idle(hid_device_handle, 0, 0);
+        ESP_LOGI(TAG, "Keyboard connected: Boot Protocol");
     } else {
-        ESP_LOGI(TAG, "HID device connected (generic, not Boot Protocol - ignored)");
+        ESP_LOGI(TAG, "HID device connected (unsupported, proto %d) - ignoring", dev_params.proto);
     }
 
     hid_host_device_start(hid_device_handle);
@@ -239,6 +406,8 @@ static void usb_host_app_task(void *arg)
 
 esp_err_t usb_host_task_start(void)
 {
+    memset(s_kbd_keycodes, HID_KEY_NO_PRESS, sizeof(s_kbd_keycodes));
+
     if (!resolve_target()) {
         return ESP_FAIL;
     }

@@ -17,6 +17,7 @@ if(KVM_ROLE STREQUAL "HOST")
         SRCS
             "main_host.c"
             "usb_host_task.c"
+            "hid_report_parser.c"
             "wifi_manager.c"
             "status_led.c"
         INCLUDE_DIRS "."
