@@ -7,11 +7,13 @@
 
 // Host role only (KVM_ROLE=HOST). See mds/2026-08-21_host_report_protocol.md.
 //
-// Minimal HID Report Descriptor parser, scoped to what a mouse needs:
-// Generic Desktop X/Y/Wheel, Button page buttons, and Consumer AC Pan
-// (horizontal scroll). Report Protocol layouts are device-specific
-// (unlike Boot Protocol's fixed layout), so this has to be parsed per
-// device rather than assumed.
+// Minimal HID Report Descriptor parser, scoped to what a mouse and a
+// keyboard's Consumer Control ("media keys") interface need: Generic
+// Desktop X/Y/Wheel, Button page buttons, Consumer AC Pan (horizontal
+// scroll), and a Consumer usage-ID selector - see
+// mds/2026-08-22_consumer_control.md. Report Protocol layouts are
+// device-specific (unlike Boot Protocol's fixed layout), so this has to
+// be parsed per device rather than assumed.
 //
 // Field byte/bit offsets in a HID report are fully determined by the
 // linear order of Input items in the descriptor, regardless of
@@ -48,6 +50,25 @@ typedef struct {
  */
 void hid_parse_mouse_report_descriptor(const uint8_t *desc, size_t desc_len,
                                        mouse_report_layout_t *out);
+
+// Field location for a keyboard's Consumer Control ("media keys")
+// interface. Recognizes the layout basically every USB keyboard uses: one
+// Report Count 1 field (commonly 16 bits) on the Consumer page whose
+// value IS the currently-pressed Consumer Usage ID (0 = none pressed,
+// e.g. HID_USAGE_CONSUMER_PLAY_PAUSE, HID_USAGE_CONSUMER_VOLUME_INCREMENT
+// - see usb/hid_usage_consumer.h). Older per-key 1-bit "bitmap" Consumer
+// descriptors (each media key its own on/off bit) aren't recognized.
+typedef struct {
+    hid_field_t selector;
+} consumer_report_layout_t;
+
+/**
+ * Parses `desc` (`desc_len` bytes) for a Consumer usage-ID selector field
+ * (see consumer_report_layout_t). Never fails outright - if nothing
+ * matching is found, `out->selector.present` is simply false.
+ */
+void hid_parse_consumer_report_descriptor(const uint8_t *desc, size_t desc_len,
+                                          consumer_report_layout_t *out);
 
 /**
  * Extracts a field's integer value from a raw input report.

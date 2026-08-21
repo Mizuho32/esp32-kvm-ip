@@ -94,11 +94,19 @@ static void maybe_record_field(mouse_report_layout_t *out, uint16_t page, uint16
     }
 }
 
-void hid_parse_mouse_report_descriptor(const uint8_t *desc, size_t desc_len,
-                                       mouse_report_layout_t *out)
-{
-    memset(out, 0, sizeof(*out));
+// Called for every bit-slot of every non-constant Main Input item, in
+// descriptor order - `usage`/`have_usage` are only meaningful for slots
+// that resolved to a specific Local Usage (single Usage item, a matching
+// Usage Minimum/Maximum range, or one Usage item shared by every slot);
+// an array selector field (e.g. Consumer Control's "current usage ID"
+// field) has no per-slot usage of its own, so have_usage is false there.
+typedef void (*input_slot_cb_t)(void *ctx, uint16_t usage_page, uint32_t usage, bool have_usage,
+                                uint8_t report_id, uint16_t bit_offset, uint8_t bit_length,
+                                bool is_signed);
 
+static void walk_report_descriptor(const uint8_t *desc, size_t desc_len,
+                                   input_slot_cb_t cb, void *ctx)
+{
     global_state_t g = {0};
     global_state_t stack[MAX_GLOBAL_STACK];
     int stack_depth = 0;
@@ -209,12 +217,12 @@ void hid_parse_mouse_report_descriptor(const uint8_t *desc, size_t desc_len,
                         have_usage = true;
                     }
 
-                    if (!is_const && have_usage) {
-                        uint16_t page  = (usage_full > 0xFFFF) ? (uint16_t)(usage_full >> 16) : g.usage_page;
+                    if (!is_const) {
+                        uint16_t page  = (have_usage && usage_full > 0xFFFF) ? (uint16_t)(usage_full >> 16) : g.usage_page;
                         uint16_t usage = (uint16_t)usage_full;
                         uint16_t bit_off = (uint16_t)(cur->bit_cursor + slot * g.report_size);
-                        maybe_record_field(out, page, usage, g.report_id, bit_off,
-                                          (uint8_t)g.report_size, g.logical_minimum < 0);
+                        cb(ctx, page, usage, have_usage, g.report_id, bit_off,
+                          (uint8_t)g.report_size, g.logical_minimum < 0);
                     }
                 }
                 cur->bit_cursor = (uint16_t)(cur->bit_cursor + g.report_size * g.report_count);
@@ -226,6 +234,65 @@ void hid_parse_mouse_report_descriptor(const uint8_t *desc, size_t desc_len,
         pending_usage_count = 0;
         have_usage_range = false;
     }
+}
+
+static void mouse_input_slot_cb(void *ctx, uint16_t page, uint32_t usage, bool have_usage,
+                                uint8_t report_id, uint16_t bit_offset, uint8_t bit_length,
+                                bool is_signed)
+{
+    if (!have_usage) {
+        return;
+    }
+    maybe_record_field((mouse_report_layout_t *)ctx, page, (uint16_t)usage, report_id,
+                       bit_offset, bit_length, is_signed);
+}
+
+void hid_parse_mouse_report_descriptor(const uint8_t *desc, size_t desc_len,
+                                       mouse_report_layout_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    walk_report_descriptor(desc, desc_len, mouse_input_slot_cb, out);
+}
+
+static void consumer_input_slot_cb(void *ctx, uint16_t page, uint32_t usage, bool have_usage,
+                                   uint8_t report_id, uint16_t bit_offset, uint8_t bit_length,
+                                   bool is_signed)
+{
+    (void)is_signed;
+    consumer_report_layout_t *out = (consumer_report_layout_t *)ctx;
+
+    // First non-constant Consumer-page field wide enough to hold a real
+    // usage ID (rules out 1-bit-per-key "bitmap" fields, which this
+    // doesn't support - see mds/2026-08-22_consumer_control.md). Keep
+    // only the first match; a descriptor with more than one such field
+    // is unusual and not worth guessing between.
+    if (out->selector.present || page != USAGE_PAGE_CONSUMER || bit_length < 8) {
+        return;
+    }
+    // AC Pan (horizontal scroll) also lives on the Consumer page but
+    // isn't a "currently pressed key" selector - real hardware has been
+    // seen bundling it into an unrelated Mouse-usage sub-report (a
+    // different Report ID) on the very same physical HID interface as
+    // the real Consumer Control selector, so it has to be excluded by
+    // name rather than just by width - see
+    // mds/2026-08-22_consumer_control.md.
+    if (have_usage && usage == USAGE_CONSUMER_AC_PAN) {
+        return;
+    }
+    out->selector = (hid_field_t){
+        .present    = true,
+        .report_id  = report_id,
+        .bit_offset = bit_offset,
+        .bit_length = bit_length,
+        .is_signed  = false, // Usage IDs are always unsigned.
+    };
+}
+
+void hid_parse_consumer_report_descriptor(const uint8_t *desc, size_t desc_len,
+                                          consumer_report_layout_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    walk_report_descriptor(desc, desc_len, consumer_input_slot_cb, out);
 }
 
 int32_t hid_extract_field(const uint8_t *report, size_t report_len, const hid_field_t *field)

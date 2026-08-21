@@ -101,6 +101,49 @@ static void unregister_mouse_device(hid_host_device_handle_t handle)
     }
 }
 
+// Per-device Consumer Control ("media keys") layout - see
+// mds/2026-08-22_consumer_control.md. Devices whose Report Descriptor
+// doesn't yield a recognizable selector field are closed again right
+// away in handle_driver_connected() and never reach this table.
+#define MAX_CONSUMER_DEVICES 4
+typedef struct {
+    hid_host_device_handle_t handle;
+    consumer_report_layout_t layout;
+} consumer_device_state_t;
+static consumer_device_state_t s_consumer_devices[MAX_CONSUMER_DEVICES];
+static int s_consumer_device_count;
+
+static consumer_device_state_t *find_consumer_device(hid_host_device_handle_t handle)
+{
+    for (int i = 0; i < s_consumer_device_count; i++) {
+        if (s_consumer_devices[i].handle == handle) {
+            return &s_consumer_devices[i];
+        }
+    }
+    return NULL;
+}
+
+static consumer_device_state_t *register_consumer_device(hid_host_device_handle_t handle)
+{
+    if (s_consumer_device_count >= MAX_CONSUMER_DEVICES) {
+        return NULL;
+    }
+    consumer_device_state_t *d = &s_consumer_devices[s_consumer_device_count++];
+    memset(d, 0, sizeof(*d));
+    d->handle = handle;
+    return d;
+}
+
+static void unregister_consumer_device(hid_host_device_handle_t handle)
+{
+    for (int i = 0; i < s_consumer_device_count; i++) {
+        if (s_consumer_devices[i].handle == handle) {
+            s_consumer_devices[i] = s_consumer_devices[--s_consumer_device_count];
+            return;
+        }
+    }
+}
+
 static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
 {
     if (v < lo) return lo;
@@ -161,6 +204,17 @@ static void send_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8_t wh
     pkt.mouse.dy      = dy;
     pkt.mouse.wheel   = wheel;
     pkt.mouse.pan     = pan;
+    send_udp_packet(&pkt);
+}
+
+static void send_consumer_report(uint16_t usage_id)
+{
+    udp_packet_t pkt = {
+        .magic    = PACKET_MAGIC,
+        .sequence = ++s_seq,
+        .type     = EVENT_TYPE_CONSUMER,
+    };
+    pkt.consumer.usage_id = usage_id;
     send_udp_packet(&pkt);
 }
 
@@ -265,6 +319,17 @@ static void handle_mouse_report_generic(const mouse_report_layout_t *layout, con
     process_mouse_sample(buttons, dx, dy, wheel, pan);
 }
 
+// Forwards a keyboard's Consumer Control ("media keys") usage ID as-is,
+// on every report - no dedup, matching how the keyboard/mouse paths
+// already just forward whatever the physical device sends. Not run
+// through filter_rules.h (yet) - nothing has needed to remap/drop a
+// media key so far, see mds/2026-08-22_consumer_control.md.
+static void handle_consumer_report(const consumer_device_state_t *dev, const uint8_t *data, size_t length)
+{
+    uint16_t usage_id = (uint16_t)hid_extract_field(data, length, &dev->layout.selector);
+    send_consumer_report(usage_id);
+}
+
 static void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
                                         const hid_host_interface_event_t event,
                                         void *arg)
@@ -292,6 +357,11 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
                 } else if (dev && dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE) {
                     handle_mouse_report_boot(data, data_length);
                 }
+            } else {
+                consumer_device_state_t *dev = find_consumer_device(hid_device_handle);
+                if (dev) {
+                    handle_consumer_report(dev, data, data_length);
+                }
             }
             // Non-boot-interface keyboards and unparseable non-boot-interface
             // mice are ignored - see mds/2026-08-21_host_report_protocol.md.
@@ -300,6 +370,7 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
         case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "HID device disconnected (proto %d)", dev_params.proto);
             unregister_mouse_device(hid_device_handle);
+            unregister_consumer_device(hid_device_handle);
             hid_host_device_close(hid_device_handle);
             break;
         case HID_HOST_INTERFACE_EVENT_TRANSFER_ERROR:
@@ -320,15 +391,22 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
     bool supports_boot = (dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE);
     bool is_mouse      = (dev_params.proto == HID_PROTOCOL_MOUSE);
     bool is_keyboard   = (dev_params.proto == HID_PROTOCOL_KEYBOARD && supports_boot);
+    // A HID_PROTOCOL_NONE interface *might* be a keyboard's Consumer
+    // Control ("media keys") interface - proto/sub_class can't tell it
+    // apart from some other vendor/system-control interface a keyboard
+    // exposes, only its Report Descriptor can, and fetching that requires
+    // the interface to already be open (HID_INTERFACE_STATE_READY or
+    // ACTIVE - see mds/2026-08-22_consumer_control.md), so unlike the
+    // fully-unsupported case below this candidate does cost a transient
+    // host channel even when it turns out not to be one.
+    bool maybe_consumer = (!is_mouse && !is_keyboard && dev_params.proto == HID_PROTOCOL_NONE);
 
-    if (!is_mouse && !is_keyboard) {
-        // Don't even open the interface, let alone start it - both claim
+    if (!is_mouse && !is_keyboard && !maybe_consumer) {
+        // Don't even open the interface, let alone start it - it claims
         // one of the ESP32-S3's 8 hardware host channels
         // (OTG_NUM_HOST_CHAN, see mds/2026-08-22_multi_device.md), and an
-        // interface we're just going to ignore (e.g. a keyboard's
-        // secondary consumer-control/vendor interface) isn't worth
-        // spending one on - those are scarce once a hub + a few devices
-        // are attached.
+        // interface we're just going to ignore isn't worth spending one
+        // on - those are scarce once a hub + a few devices are attached.
         ESP_LOGI(TAG, "HID device connected (unsupported, proto %d) - ignoring, not opened", dev_params.proto);
         return;
     }
@@ -370,16 +448,38 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         } else {
             ESP_LOGE(TAG, "Mouse connected: Report Protocol descriptor unparseable and no Boot Protocol support - ignoring");
         }
-    } else {
-        // is_keyboard - the only other case that reaches here, see the
-        // early return above. Stays on Boot Protocol: modifiers + 6-key
-        // rollover is already everything filter_rules.h can see/remap,
-        // and adding a second generic report parser (keyboard usages,
-        // not just mouse) isn't needed for what's actually in scope
-        // right now.
+    } else if (is_keyboard) {
+        // Stays on Boot Protocol: modifiers + 6-key rollover is already
+        // everything filter_rules.h can see/remap, and adding a second
+        // generic report parser (keyboard usages, not just mouse) isn't
+        // needed for what's actually in scope right now.
         hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_BOOT);
         hid_class_request_set_idle(hid_device_handle, 0, 0);
         ESP_LOGI(TAG, "Keyboard connected: Boot Protocol");
+    } else {
+        // maybe_consumer - the only other case that reaches here, see the
+        // early return above.
+        size_t desc_len = 0;
+        uint8_t *desc = hid_host_get_report_descriptor(hid_device_handle, &desc_len);
+        consumer_report_layout_t layout = {0};
+        if (desc && desc_len > 0) {
+            hid_parse_consumer_report_descriptor(desc, desc_len, &layout);
+        }
+        if (!layout.selector.present) {
+            ESP_LOGI(TAG, "HID device connected (proto 0, not a recognized Consumer Control layout) - closing");
+            hid_host_device_close(hid_device_handle);
+            return;
+        }
+
+        consumer_device_state_t *dev = register_consumer_device(hid_device_handle);
+        if (!dev) {
+            ESP_LOGW(TAG, "Consumer Control device connected but MAX_CONSUMER_DEVICES reached - closing");
+            hid_host_device_close(hid_device_handle);
+            return;
+        }
+        dev->layout = layout;
+        ESP_LOGI(TAG, "Consumer Control device connected (media keys): bit_offset=%d bit_length=%d report_id=%d",
+                 layout.selector.bit_offset, layout.selector.bit_length, layout.selector.report_id);
     }
 
     hid_host_device_start(hid_device_handle);
