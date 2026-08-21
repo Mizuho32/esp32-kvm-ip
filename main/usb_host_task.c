@@ -327,6 +327,9 @@ static void handle_mouse_report_generic(const mouse_report_layout_t *layout, con
 static void handle_consumer_report(const consumer_device_state_t *dev, const uint8_t *data, size_t length)
 {
     uint16_t usage_id = (uint16_t)hid_extract_field(data, length, &dev->layout.selector);
+    ESP_LOGD(TAG, "Consumer report: usage_id=0x%04X (report_len=%d, selector bit_offset=%d bit_length=%d report_id=%d)",
+             usage_id, (int)length, dev->layout.selector.bit_offset,
+             dev->layout.selector.bit_length, dev->layout.selector.report_id);
     send_consumer_report(usage_id);
 }
 
@@ -465,6 +468,9 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         if (desc && desc_len > 0) {
             hid_parse_consumer_report_descriptor(desc, desc_len, &layout);
         }
+        ESP_LOGD(TAG, "proto 0 interface report descriptor (%d bytes):", (int)desc_len);
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, desc, desc_len, ESP_LOG_DEBUG);
+
         if (!layout.selector.present) {
             ESP_LOGI(TAG, "HID device connected (proto 0, not a recognized Consumer Control layout) - closing");
             hid_host_device_close(hid_device_handle);
