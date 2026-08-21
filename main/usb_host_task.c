@@ -317,6 +317,22 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         return;
     }
 
+    bool supports_boot = (dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE);
+    bool is_mouse      = (dev_params.proto == HID_PROTOCOL_MOUSE);
+    bool is_keyboard   = (dev_params.proto == HID_PROTOCOL_KEYBOARD && supports_boot);
+
+    if (!is_mouse && !is_keyboard) {
+        // Don't even open the interface, let alone start it - both claim
+        // one of the ESP32-S3's 8 hardware host channels
+        // (OTG_NUM_HOST_CHAN, see mds/2026-08-22_multi_device.md), and an
+        // interface we're just going to ignore (e.g. a keyboard's
+        // secondary consumer-control/vendor interface) isn't worth
+        // spending one on - those are scarce once a hub + a few devices
+        // are attached.
+        ESP_LOGI(TAG, "HID device connected (unsupported, proto %d) - ignoring, not opened", dev_params.proto);
+        return;
+    }
+
     const hid_host_device_config_t dev_config = {
         .callback     = hid_host_interface_callback,
         .callback_arg = NULL,
@@ -325,9 +341,7 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         return;
     }
 
-    bool supports_boot = (dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE);
-
-    if (dev_params.proto == HID_PROTOCOL_MOUSE) {
+    if (is_mouse) {
         // Always try Report Protocol first - it's the only way to get
         // wheel/pan/extra buttons, regardless of Boot Interface support
         // (Report Protocol works on any HID mouse; Boot Protocol is only
@@ -356,16 +370,16 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         } else {
             ESP_LOGE(TAG, "Mouse connected: Report Protocol descriptor unparseable and no Boot Protocol support - ignoring");
         }
-    } else if (dev_params.proto == HID_PROTOCOL_KEYBOARD && supports_boot) {
-        // Keyboards stay on Boot Protocol - modifiers + 6-key rollover is
-        // already everything filter_rules.h can see/remap, and adding a
-        // second generic report parser (keyboard usages, not just mouse)
-        // isn't needed for what's actually in scope right now.
+    } else {
+        // is_keyboard - the only other case that reaches here, see the
+        // early return above. Stays on Boot Protocol: modifiers + 6-key
+        // rollover is already everything filter_rules.h can see/remap,
+        // and adding a second generic report parser (keyboard usages,
+        // not just mouse) isn't needed for what's actually in scope
+        // right now.
         hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_BOOT);
         hid_class_request_set_idle(hid_device_handle, 0, 0);
         ESP_LOGI(TAG, "Keyboard connected: Boot Protocol");
-    } else {
-        ESP_LOGI(TAG, "HID device connected (unsupported, proto %d) - ignoring", dev_params.proto);
     }
 
     hid_host_device_start(hid_device_handle);
