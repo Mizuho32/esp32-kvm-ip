@@ -75,6 +75,12 @@ typedef struct {
     bool                     use_report_protocol;
     mouse_report_layout_t    layout;
     consumer_report_layout_t consumer_layout;
+    // Last Consumer usage_id sent for the Report-ID-stripped 3-byte
+    // dongle quirk (see mds/2026-08-22_wireless_dongle_short_reports.md).
+    // Used to edge-trigger the release(0) send instead of requiring an
+    // exact all-zero 3-byte report, which residual dx/dy jitter can
+    // defeat.
+    uint16_t                 last_boot_consumer_usage;
 } mouse_device_state_t;
 static mouse_device_state_t s_mouse_devices[MAX_MOUSE_DEVICES];
 static int s_mouse_device_count;
@@ -327,10 +333,10 @@ static void handle_mouse_report_generic(const mouse_report_layout_t *layout, con
 
     // Debug aid - see comment on the ESP_LOGI above in
     // handle_consumer_report(); comment this out when not needed.
-    //*
+    /*
     ESP_LOGI(TAG, "Mouse extracted: buttons=0x%02X dx=%d dy=%d wheel=%d pan=%d",
              buttons, dx, dy, wheel, pan);
-    //*/
+    */
 
     process_mouse_sample(buttons, dx, dy, wheel, pan);
 }
@@ -350,11 +356,11 @@ static void handle_consumer_report(const consumer_report_layout_t *layout, const
     // entirely rather than just filtered at runtime; comment this out
     // instead of leaving it live, to avoid spamming every report. Keep
     // send_consumer_report() itself outside the toggle either way.
-    //*
+    /*
     ESP_LOGI(TAG, "Consumer report: usage_id=0x%04X (report_len=%d, selector bit_offset=%d bit_length=%d report_id=%d)",
              usage_id, (int)length, layout->selector.bit_offset,
              layout->selector.bit_length, layout->selector.report_id);
-    //*/
+    */
     send_consumer_report(usage_id);
 }
 
@@ -385,10 +391,10 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
                 // needed. Every raw report this interface produces,
                 // before any Report-ID-based dispatch - see
                 // mds/2026-08-22_9buttons_mouse.md.
-                //*
+                /*
                 ESP_LOGI(TAG, "Mouse raw report (%d bytes):", (int)data_length);
                 ESP_LOG_BUFFER_HEX(TAG, data, data_length);
-                //*/
+                */
                 // A bundled Consumer Control selector (volume/forward/back
                 // etc. on some mice - mds/2026-08-22_9buttons_mouse.md)
                 // lives on its own Report ID within this same interface,
@@ -417,21 +423,27 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
                     data_length == sizeof(hid_mouse_input_report_boot_t) &&
                     data[0] > max_boot_buttons_value) {
                     uint16_t usage_id = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
-                    send_consumer_report(usage_id);
+                    if (usage_id != dev->last_boot_consumer_usage) {
+                        send_consumer_report(usage_id);
+                        dev->last_boot_consumer_usage = usage_id;
+                    }
                 } else if (dev && dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE &&
                            data_length == sizeof(hid_mouse_input_report_boot_t)) {
                     handle_mouse_report_boot(data, data_length);
-                    // An all-zero report is ambiguous on these dongles -
-                    // it's both "no buttons, no movement" AND what a
-                    // Consumer usage release looks like with its Report
-                    // ID byte missing (see mds/2026-08-22_9buttons_mouse.md:
-                    // without this, releasing e.g. Volume Up never sends
-                    // usage_id=0, so the Device role holds it pressed
-                    // forever). 0 is a harmless no-op release either way,
-                    // so just send both interpretations.
+                    // Any report that lands here (data[0] within the
+                    // normal buttons range) is definitely NOT a Consumer
+                    // usage code, regardless of dx/dy - so if a Consumer
+                    // key was being held, it just got released. Edge-
+                    // triggered on dev->last_boot_consumer_usage instead
+                    // of requiring an exact all-zero 3-byte report: relying
+                    // on exact-zero missed releases whenever residual
+                    // dx/dy jitter (e.g. hand tremor) landed in the same
+                    // packet as the release, leaving the key stuck held
+                    // (see mds/2026-08-22_wireless_dongle_short_reports.md).
                     if (dev->consumer_layout.selector.present &&
-                        data[0] == 0 && data[1] == 0 && data[2] == 0) {
+                        dev->last_boot_consumer_usage != 0) {
                         send_consumer_report(0);
+                        dev->last_boot_consumer_usage = 0;
                     }
                 } else if (dev && dev->consumer_layout.selector.present &&
                     dev->consumer_layout.selector.report_id != 0 &&
@@ -516,10 +528,10 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         uint8_t *desc = hid_host_get_report_descriptor(hid_device_handle, &desc_len);
         // Debug aid - see comment on the ESP_LOGI above in
         // handle_consumer_report(); comment this out when not needed.
-        //*
+        /*
         ESP_LOGI(TAG, "mouse interface report descriptor (%d bytes):", (int)desc_len);
         ESP_LOG_BUFFER_HEX(TAG, desc, desc_len);
-        //*/
+        */
         if (dev && desc && desc_len > 0) {
             hid_parse_mouse_report_descriptor(desc, desc_len, &dev->layout);
             parsed_ok = dev->layout.x.present && dev->layout.y.present;
@@ -543,7 +555,7 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
             // see mds/2026-08-22_9buttons_mouse.md for why that matters
             // (a device that silently ignores/rejects this request would
             // just keep sending whatever it was already sending).
-            //*
+            /*
             {
                 esp_err_t set_err = hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_REPORT);
                 hid_report_protocol_t actual_protocol = HID_REPORT_PROTOCOL_MAX;
@@ -551,12 +563,15 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
                 ESP_LOGI(TAG, "SET_PROTOCOL(Report)=%s, GET_PROTOCOL=%s (value=%d, 0=Boot 1=Report)",
                          esp_err_to_name(set_err), esp_err_to_name(get_err), actual_protocol);
             }
-            //*/
+            */
             hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_REPORT);
-            // Keyboards already get this call below; mice never did.
-            // Some devices don't start producing (full) reports until
-            // told an idle rate - worth trying against the wireless
-            // dongle quirk in mds/2026-08-22_9buttons_mouse.md.
+            // Tried skipping this entirely (mirroring the Linux usbmon
+            // capture in wireshark_9btn_mouse/, which never sends
+            // SET_PROTOCOL at all) - no effect, still 3-byte reports.
+            // So SET_PROTOCOL negotiation isn't the mechanism behind the
+            // truncation; keeping this call since removing it had no
+            // upside and could regress some other mouse that actually
+            // needs it. See mds/2026-08-22_wireless_dongle_short_reports.md.
             hid_class_request_set_idle(hid_device_handle, 0, 0);
             dev->use_report_protocol = true;
             ESP_LOGI(TAG, "Mouse connected: Report Protocol (buttons=%d wheel=%d pan=%d)",
@@ -586,14 +601,14 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         // itself as this same interface may still bundle extra Report
         // IDs alongside it - see mds/2026-08-22_9buttons_mouse.md, where
         // exactly that happened on the mouse-classified interface.
-        //*
+        /*
         {
             size_t kbd_desc_len = 0;
             uint8_t *kbd_desc = hid_host_get_report_descriptor(hid_device_handle, &kbd_desc_len);
             ESP_LOGI(TAG, "keyboard interface report descriptor (%d bytes):", (int)kbd_desc_len);
             ESP_LOG_BUFFER_HEX(TAG, kbd_desc, kbd_desc_len);
         }
-        //*/
+        */
     } else {
         // maybe_consumer - the only other case that reaches here, see the
         // early return above.
@@ -605,10 +620,10 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         }
         // Debug aid - see comment on the ESP_LOGI above in
         // handle_consumer_report(); comment this out when not needed.
-        //*
+        /*
         ESP_LOGI(TAG, "proto 0 interface report descriptor (%d bytes):", (int)desc_len);
         ESP_LOG_BUFFER_HEX(TAG, desc, desc_len);
-        //*/
+        */
 
         if (!layout.selector.present) {
             ESP_LOGI(TAG, "HID device connected (proto 0, not a recognized Consumer Control layout) - closing");
