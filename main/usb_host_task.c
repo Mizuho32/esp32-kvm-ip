@@ -553,6 +553,11 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
             }
             //*/
             hid_class_request_set_protocol(hid_device_handle, HID_REPORT_PROTOCOL_REPORT);
+            // Keyboards already get this call below; mice never did.
+            // Some devices don't start producing (full) reports until
+            // told an idle rate - worth trying against the wireless
+            // dongle quirk in mds/2026-08-22_9buttons_mouse.md.
+            hid_class_request_set_idle(hid_device_handle, 0, 0);
             dev->use_report_protocol = true;
             ESP_LOGI(TAG, "Mouse connected: Report Protocol (buttons=%d wheel=%d pan=%d)",
                      dev->layout.button_count, dev->layout.wheel.present, dev->layout.pan.present);
