@@ -241,6 +241,13 @@ static void max3421_host_task(void *arg)
     };
     tuh_configure(MAX3421_RHPORT, TUH_CFGID_MAX3421, &cfg);
 
+    // TinyUSB defaults to Boot Protocol (hid_host.c's _hidh_default_protocol),
+    // same as the RP2040 cross-test needed to override - see
+    // mds/2026-08-22_rp2040_host_check.md. Without this, mice come back as
+    // plain 3-byte buttons/dx/dy, not the Report ID-tagged Report Protocol
+    // data (wheel, extra buttons) this project actually wants.
+    tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT);
+
     const tusb_rhport_init_t rh_init = {
         .role  = TUSB_ROLE_HOST,
         .speed = TUSB_SPEED_FULL,
