@@ -16,6 +16,7 @@
 #include "status_led.h"
 #include "usb_device_typec.h"
 #include "usb_host_max3421.h"
+#include "usb_host_rp2040_bridge.h"
 #include "usb_host_task.h"
 #include "wifi_credentials.h"
 #include "wifi_manager.h"
@@ -56,33 +57,50 @@ void app_main(void)
         esp_restart();
     }
 
-    // Exactly one Host backend runs, never both - see usb_host_max3421.h
-    // and mds/2026-08-23_filter_conv_router_with_max3421.md. If MAX3421E
-    // is present, native OTG is deliberately left unused so it's free for
-    // a future USB Device (type-c) output path (Phase2); otherwise fall
-    // back to native OTG as before. Both backends funnel into the same
-    // hid_forwarder.c pipeline either way.
-    if (usb_host_max3421_probe()) {
-        ESP_LOGI(TAG, "MAX3421E detected - using SPI USB Host backend");
-        // The native OTG port is free now (MAX3421E is doing Host duty
-        // over SPI instead) - bring it up as a type-c USB Device output
-        // (Phase2, mds/2026-08-23_filter_conv_router_with_max3421.md).
-        // Not fatal if it fails: hid_forwarder.c falls back to UDP-only
-        // when usb_device_typec_connected() is false.
-        if (usb_device_typec_start() != ESP_OK) {
-            ESP_LOGW(TAG, "type-c USB Device output failed to start (not fatal - continuing UDP-only)");
+    // Exactly one Host backend runs, never more than one - see
+    // usb_host_max3421.h, usb_host_rp2040_bridge.h and
+    // mds/2026-08-23_filter_conv_router_with_max3421.md /
+    // mds/2026-08-23_rp2040_as_host_bridge_plan.md. RP2040 bridge is
+    // tried first (currently the preferred backend - see the RP2040 doc
+    // for why), then MAX3421E, then native OTG as the last-resort
+    // fallback. Whichever of the first two backends is used, native OTG
+    // is deliberately left unused so it's free for the USB Device
+    // (type-c) output path (Phase2); native OTG fallback can't offer
+    // that (it's already busy being the Host input). All backends funnel
+    // into the same hid_forwarder.c pipeline either way.
+    bool typec_capable = false;
+    if (usb_host_rp2040_bridge_probe()) {
+        ESP_LOGI(TAG, "RP2040 bridge detected - using UART USB Host backend");
+        if (usb_host_rp2040_bridge_task_start() != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start RP2040 bridge task. Restarting in 5s...");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            esp_restart();
         }
+        typec_capable = true;
+    } else if (usb_host_max3421_probe()) {
+        ESP_LOGI(TAG, "MAX3421E detected - using SPI USB Host backend");
         if (usb_host_max3421_task_start() != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start MAX3421 USB host task. Restarting in 5s...");
             vTaskDelay(pdMS_TO_TICKS(5000));
             esp_restart();
         }
+        typec_capable = true;
     } else {
-        ESP_LOGI(TAG, "No MAX3421E detected - using native OTG USB Host backend");
+        ESP_LOGI(TAG, "No RP2040 bridge or MAX3421E detected - using native OTG USB Host backend");
         if (usb_host_task_start() != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start USB host task. Restarting in 5s...");
             vTaskDelay(pdMS_TO_TICKS(5000));
             esp_restart();
+        }
+    }
+
+    if (typec_capable) {
+        // Native OTG is free (whichever backend above is in use isn't
+        // using it) - bring it up as a type-c USB Device output (Phase2).
+        // Not fatal if it fails: hid_forwarder.c falls back to UDP-only
+        // when usb_device_typec_connected() is false.
+        if (usb_device_typec_start() != ESP_OK) {
+            ESP_LOGW(TAG, "type-c USB Device output failed to start (not fatal - continuing UDP-only)");
         }
     }
 

@@ -18,6 +18,7 @@ if(KVM_ROLE STREQUAL "HOST")
             "main_host.c"
             "usb_host_task.c"
             "usb_host_max3421.c"
+            "usb_host_rp2040_bridge.c"
             "usb_device_typec.c"
             "usb_descriptors.c"
             "hid_forwarder.c"
@@ -33,8 +34,13 @@ if(KVM_ROLE STREQUAL "HOST")
             lwip
             esp_driver_gpio
             esp_driver_spi
-            usb
     )
+    # esp_driver_uart (usb_host_rp2040_bridge.c's driver/uart.h) doesn't
+    # get its include dir propagated to this component via PRIV_REQUIRES
+    # above for reasons that didn't resolve after a full clean reconfigure
+    # (esp_driver_gpio/esp_driver_spi in the same list work fine) - linked
+    # explicitly instead as a workaround.
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart)
 elseif(KVM_ROLE STREQUAL "DEVICE")
     idf_component_register(
         SRCS
