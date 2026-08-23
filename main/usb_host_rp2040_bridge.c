@@ -43,6 +43,12 @@ typedef enum {
     BRIDGE_MSG_MOUNT     = 0x02, // payload = HID Report Descriptor
     BRIDGE_MSG_UNMOUNT   = 0x03, // len=0
     BRIDGE_MSG_REPORT    = 0x04, // payload = raw HID report bytes
+    // RP2040-side RATE_MONITOR stats (rp2040_host_bridge.ino), sent once
+    // a second over this same link so they show up here without a
+    // separate USB-serial adapter wired to the RP2040's Serial2 - see
+    // mds/2026-08-24_rp2040_bridge_fps_investigation.md. Payload: 3x
+    // uint32 LE (reports_per_sec, min_interval_us, max_interval_us).
+    BRIDGE_MSG_STATS     = 0x05,
 } bridge_msg_type_t;
 
 // USB HID spec bInterfaceProtocol values (not a TinyUSB-specific enum -
@@ -445,6 +451,20 @@ static void handle_frame(void)
     switch (s_msg_type) {
     case BRIDGE_MSG_HEARTBEAT:
         break; // probing/keepalive only
+    case BRIDGE_MSG_STATS: {
+        // Diagnostic only - logged directly here (not handed to
+        // dispatch_task()) since it's once-a-second and not device HID
+        // data. Payload: 3x uint32 LE, see the enum comment above.
+        if (s_payload_idx >= 12) {
+            uint32_t reports, min_us, max_us;
+            memcpy(&reports, &s_payload[0], sizeof(reports));
+            memcpy(&min_us, &s_payload[4], sizeof(min_us));
+            memcpy(&max_us, &s_payload[8], sizeof(max_us));
+            ESP_LOGI(TAG, "[rp2040-rate] %u reports/sec, min interval %uus, max interval %uus",
+                     (unsigned)reports, (unsigned)min_us, (unsigned)max_us);
+        }
+        break;
+    }
     case BRIDGE_MSG_MOUNT:
     case BRIDGE_MSG_UNMOUNT:
     case BRIDGE_MSG_REPORT: {
