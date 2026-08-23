@@ -12,6 +12,7 @@
 #include "usb/hid_usage_keyboard.h"
 
 #include "protocol.h"
+#include "usb_device_typec.h"
 #include "wifi_credentials.h"
 
 // filter_rules.h is a gitignored personal copy of filter_rules.h.example
@@ -21,6 +22,16 @@
 #include "filter_rules.h"
 #else
 #include "filter_rules_default.h"
+#endif
+
+// route_rules.h: same personal-copy-or-default pattern, but for UDP vs
+// type-c routing (Phase2, mds/2026-08-23_filter_conv_router_with_max3421.md)
+// rather than filtering/remapping - only consulted while type-c is
+// actually connected (usb_device_typec_connected()).
+#if __has_include("route_rules.h")
+#include "route_rules.h"
+#else
+#include "route_rules_default.h"
 #endif
 
 #define TAG "HIDFWD"
@@ -95,10 +106,9 @@ static void send_mouse_report_raw(uint8_t buttons, int16_t dx, int16_t dy, int8_
     send_udp_packet(&pkt);
 }
 
-static void send_merged_keyboard_report(void)
+static void compute_merged_keyboard_report(uint8_t *modifiers, uint8_t keycodes[6])
 {
-    uint8_t modifiers = s_kbd_modifiers | s_synth_modifiers;
-    uint8_t keycodes[6];
+    *modifiers = s_kbd_modifiers | s_synth_modifiers;
     memcpy(keycodes, s_kbd_keycodes, 6);
 
     if (s_synth_keycode != HID_KEY_NO_PRESS) {
@@ -118,7 +128,25 @@ static void send_merged_keyboard_report(void)
             }
         }
     }
+}
 
+// While type-c is connected (usb_device_typec_connected()), every report
+// always goes there; route_rules.h decides whether it *also* gets
+// mirrored over UDP. Otherwise (not connected, or no MAX3421E at all -
+// see main_host.c) everything goes over UDP as before Phase2 - see
+// mds/2026-08-23_filter_conv_router_with_max3421.md.
+static void dispatch_merged_keyboard_report(void)
+{
+    uint8_t modifiers;
+    uint8_t keycodes[6];
+    compute_merged_keyboard_report(&modifiers, keycodes);
+
+    if (usb_device_typec_connected()) {
+        usb_device_typec_keyboard_report(modifiers, keycodes);
+        if (!route_keyboard_also_udp(modifiers, keycodes)) {
+            return;
+        }
+    }
     send_keyboard_report_raw(modifiers, keycodes);
 }
 
@@ -129,7 +157,7 @@ static void apply_mouse_synth_keys(uint8_t modifiers, uint8_t keycode)
     }
     s_synth_modifiers = modifiers;
     s_synth_keycode   = keycode;
-    send_merged_keyboard_report();
+    dispatch_merged_keyboard_report();
 }
 
 void hid_forwarder_keyboard_report(uint8_t modifiers, const uint8_t keycodes_in[6])
@@ -139,7 +167,7 @@ void hid_forwarder_keyboard_report(uint8_t modifiers, const uint8_t keycodes_in[
     if (filter_keyboard_report(&modifiers, keycodes)) {
         s_kbd_modifiers = modifiers;
         memcpy(s_kbd_keycodes, keycodes, 6);
-        send_merged_keyboard_report();
+        dispatch_merged_keyboard_report();
     }
 }
 
@@ -149,13 +177,27 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
     uint8_t synth_keycode = HID_KEY_NO_PRESS;
 
     if (filter_mouse_report(&buttons, &dx, &dy, &wheel, &pan, &synth_modifiers, &synth_keycode)) {
-        send_mouse_report_raw(buttons, dx, dy, wheel, pan);
+        if (usb_device_typec_connected()) {
+            usb_device_typec_mouse_report(buttons, dx, dy, wheel, pan);
+            if (route_mouse_also_udp(buttons, dx, dy, wheel, pan)) {
+                send_mouse_report_raw(buttons, dx, dy, wheel, pan);
+            }
+        } else {
+            send_mouse_report_raw(buttons, dx, dy, wheel, pan);
+        }
     }
     apply_mouse_synth_keys(synth_modifiers, synth_keycode);
 }
 
 void hid_forwarder_consumer(uint16_t usage_id)
 {
+    if (usb_device_typec_connected()) {
+        usb_device_typec_consumer_report(usage_id);
+        if (!route_consumer_also_udp(usage_id)) {
+            return;
+        }
+    }
+
     udp_packet_t pkt = {
         .magic    = PACKET_MAGIC,
         .sequence = ++s_seq,

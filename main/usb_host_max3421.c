@@ -29,13 +29,13 @@
 #define MAX3421_PIN_INT   6
 
 // Logical TinyUSB root-hub port number for the MAX3421E - see
-// CFG_TUSB_RHPORT0_MODE in components/tinyusb/host_config/tusb_config.h
-// (KVM_ROLE=HOST's own TinyUSB build has no device-mode rhport0 to
-// collide with, unlike a board also acting as a USB device on its native
-// port - see that file for why). Not tied to any physical pin numbering;
-// MAX3421 has no native "port index" of its own since it's just an
-// SPI-attached SIE, this is purely a software slot identifier.
-#define MAX3421_RHPORT    0
+// CFG_TUSB_RHPORT1_MODE in components/tinyusb/host_config/tusb_config.h.
+// rhport0 is native OTG as a Device (main/usb_device_typec.c, Phase2
+// type-c output) - MAX3421E gets rhport1 instead so the two don't
+// collide. Not tied to any physical pin numbering; MAX3421 has no native
+// "port index" of its own since it's just an SPI-attached SIE, this is
+// purely a software slot identifier.
+#define MAX3421_RHPORT    1
 
 #define MAX3421_SPI_HOST  SPI2_HOST
 // MAX3421E datasheet allows up to ~26MHz SPI, but that's optimistic over
@@ -47,6 +47,7 @@
 
 static spi_device_handle_t s_spi_dev;
 static TaskHandle_t s_max3421_task;
+static bool s_bus_initialized;
 
 // ── Board API required by components/tinyusb's core (tusb_common.h) ───
 // A millisecond tick source - TinyUSB has no built-in notion of time
@@ -185,6 +186,64 @@ static esp_err_t max3421_spi_bus_init(void)
         .queue_size     = 1,
     };
     return spi_bus_add_device(MAX3421_SPI_HOST, &dev_conf, &s_spi_dev);
+}
+
+// Shared by usb_host_max3421_probe() and max3421_host_task() - the probe
+// runs first (from app_main(), before deciding which Host backend to
+// start at all) and the task reuses the same already-initialized
+// GPIO/SPI state instead of re-running spi_bus_initialize(), which would
+// fail the second time (ESP_ERR_INVALID_STATE, bus already claimed).
+static esp_err_t max3421_ensure_bus_initialized(void)
+{
+    if (s_bus_initialized) {
+        return ESP_OK;
+    }
+    esp_err_t err = max3421_spi_gpio_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = max3421_spi_bus_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+    s_bus_initialized = true;
+    return ESP_OK;
+}
+
+// Same register address hcd_max3421.c's own internal revision check uses
+// (see REVISION_ADDR in components/tinyusb/src/portable/analog/max3421/
+// hcd_max3421.c) - not exported via hcd_max3421.h, so duplicated here.
+// Read directly via tuh_max3421_spi_cs_api()/spi_xfer_api() rather than
+// the driver's own tuh_max3421_reg_read(): that helper locks a mutex
+// (_hcd_data.spi_mutex) that's only created inside hcd_init(), which
+// hasn't run yet at probe time.
+#define MAX3421_REVISION_ADDR (18u << 3)
+
+bool usb_host_max3421_probe(void)
+{
+    esp_err_t err = max3421_ensure_bus_initialized();
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "MAX3421 probe: GPIO/SPI init failed (%s) - assuming not present", esp_err_to_name(err));
+        return false;
+    }
+
+    uint8_t tx_buf[2] = { MAX3421_REVISION_ADDR, 0 };
+    uint8_t rx_buf[2] = { 0, 0 };
+    tuh_max3421_spi_cs_api(MAX3421_RHPORT, true);
+    bool xfer_ok = tuh_max3421_spi_xfer_api(MAX3421_RHPORT, tx_buf, rx_buf, 2);
+    tuh_max3421_spi_cs_api(MAX3421_RHPORT, false);
+
+    // v1 is 0x01, v2 is 0x12, v3 is 0x13 (same check hcd_init() itself
+    // makes). Not bulletproof against a floating/garbage bus coincidentally
+    // matching one of these bytes, but no worse than what the driver
+    // already relies on internally - see
+    // mds/2026-08-23_filter_conv_router_with_max3421.md for the earlier
+    // "looked alive even seemingly unpowered" report on this wiring.
+    uint8_t revision = rx_buf[1];
+    bool present = xfer_ok && (revision == 0x01 || revision == 0x12 || revision == 0x13);
+    ESP_LOGI(TAG, "MAX3421 probe: xfer_ok=%d revision=0x%02x -> %s",
+             xfer_ok, revision, present ? "present" : "not present");
+    return present;
 }
 
 // ── Per-device state, purely for dispatch/parsing - see
@@ -455,16 +514,12 @@ static void max3421_host_task(void *arg)
 
     // Done here, after the task handle itself is already running (rather
     // than by the caller before xTaskCreate()), so max3421_gpio_isr()
-    // can never fire against a not-yet-assigned s_max3421_task.
-    esp_err_t err = max3421_spi_gpio_init();
+    // can never fire against a not-yet-assigned s_max3421_task. Usually
+    // already done by usb_host_max3421_probe() by this point (see
+    // main_host.c) - max3421_ensure_bus_initialized() is a no-op if so.
+    esp_err_t err = max3421_ensure_bus_initialized();
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "GPIO init failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
-    }
-    err = max3421_spi_bus_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "GPIO/SPI init failed: %s", esp_err_to_name(err));
         vTaskDelete(NULL);
         return;
     }

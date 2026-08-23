@@ -1,11 +1,17 @@
 #ifndef TUSB_CONFIG_H
 #define TUSB_CONFIG_H
 
-// KVM_ROLE=HOST's own TinyUSB config (main/usb_host_max3421.c) - TinyUSB
-// Host mode over SPI via a MAX3421E, used as a Phase 1 smoke test /
-// eventual fallback path alongside the native OTG Host (usb_host_task.c)
-// for devices the native controller mishandles - see
-// mds/2026-08-23_filter_conv_router_with_max3421.md.
+// KVM_ROLE=HOST's own TinyUSB config - dual rhport, see
+// mds/2026-08-23_filter_conv_router_with_max3421.md:
+// - rhport0 = native OTG as a Device (main/usb_device_typec.c, Phase2
+//   type-c output), only actually started when MAX3421E is present.
+// - rhport1 = MAX3421E as Host over SPI (main/usb_host_max3421.c),
+//   TinyUSB Host mode via hcd_max3421.c, used instead of the native OTG
+//   Host path (usb_host_task.c) for devices the native controller
+//   mishandles.
+// Both halves are always compiled in (KVM_ROLE is a build-time choice,
+// this dual-rhport split is not) - main_host.c decides at runtime which
+// to actually initialize (usb_host_max3421_probe()).
 //
 // Lives here (inside the tinyusb override component, see
 // ../CMakeLists.txt's `target_include_directories(... BEFORE PRIVATE
@@ -17,7 +23,31 @@
 // preempting anything in main/ - the `BEFORE` in ../CMakeLists.txt is
 // what lets this file win instead, only for KVM_ROLE=HOST.
 
-#define CFG_TUSB_RHPORT0_MODE   (OPT_MODE_HOST | OPT_MODE_FULL_SPEED)
+#define CFG_TUSB_RHPORT0_MODE   (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
+#define CFG_TUSB_RHPORT1_MODE   (OPT_MODE_HOST | OPT_MODE_FULL_SPEED)
+
+// ── rhport0: Device (type-c output, main/usb_device_typec.c) ──────────
+// Single HID interface set (keyboard/mouse/Consumer Control - see
+// main/usb_descriptors.h, reused as-is from the Device role). Values
+// mirror what espressif/esp_tinyusb's own Kconfig-driven config would
+// produce for that descriptor set - not going through esp_tinyusb's
+// Kconfig here since this is a plain compile-time header, but
+// usb_device_typec.c *does* still go through esp_tinyusb's
+// tinyusb_driver_install() at runtime (see that file for why).
+#define CFG_TUD_ENDPOINT0_SIZE  64
+#define CFG_TUD_HID             3
+#define CFG_TUD_HID_EP_BUFSIZE  64
+#define CFG_TUD_CDC             0
+#define CFG_TUD_MSC             0
+#define CFG_TUD_MIDI            0
+#define CFG_TUD_VENDOR          0
+#define CFG_TUD_ECM_RNDIS       0
+#define CFG_TUD_NCM             0
+#define CFG_TUD_DFU             0
+#define CFG_TUD_DFU_RUNTIME     0
+#define CFG_TUD_BTH             0
+
+// ── rhport1: Host (MAX3421E, main/usb_host_max3421.c) ──────────────────
 #define CFG_TUH_MAX3421         1
 #define CFG_TUH_HUB             1
 #define CFG_TUH_DEVICE_MAX      4

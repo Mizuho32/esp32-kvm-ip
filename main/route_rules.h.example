@@ -1,0 +1,66 @@
+#ifndef ROUTE_RULES_H
+#define ROUTE_RULES_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+// Host role only (KVM_ROLE=HOST), MAX3421E backend only.
+//
+// Copy this file to route_rules.h and edit it - route_rules.h is
+// gitignored (like filter_rules.h), since rules are a personal
+// customization, not something a fresh checkout should apply by
+// default. hid_forwarder.c includes route_rules.h if present, falling
+// back to route_rules_default.h ("type-c only") otherwise.
+//
+// Only consulted while the native USB-OTG port is actually connected to
+// a PC as a USB Device (tud_mounted() - see usb_device_typec.h); if it
+// isn't, everything goes over UDP regardless of these, same as always.
+// While connected, every (already filter_rules.h-filtered) report
+// always goes to type-c; these decide whether it *also* gets mirrored
+// over UDP to the existing Device-role board. Below: nothing is mirrored
+// by default - edit freely, this is your copy.
+
+/**
+ * @return true to also send this keyboard report over UDP while type-c
+ *         is connected (it always goes to type-c either way).
+ */
+static inline bool route_keyboard_also_udp(uint8_t modifiers, const uint8_t keycodes[6])
+{
+    // Example: mirror everything to UDP too (e.g. to also drive the
+    // Device-role board's target PC at the same time as the local one):
+    //
+    // (void)modifiers;
+    // (void)keycodes;
+    // return true;
+
+    (void)modifiers;
+    (void)keycodes;
+    return false;
+}
+
+/**
+ * @return true to also send this mouse report over UDP while type-c is
+ *         connected (it always goes to type-c either way).
+ */
+static inline bool route_mouse_also_udp(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
+{
+    (void)buttons;
+    (void)dx;
+    (void)dy;
+    (void)wheel;
+    (void)pan;
+    return false;
+}
+
+/**
+ * @return true to also send this Consumer Control (media key) report
+ *         over UDP while type-c is connected (it always goes to type-c
+ *         either way).
+ */
+static inline bool route_consumer_also_udp(uint16_t usage_id)
+{
+    (void)usage_id;
+    return false;
+}
+
+#endif

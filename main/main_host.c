@@ -14,6 +14,7 @@
 #include "hid_forwarder.h"
 #include "protocol.h"
 #include "status_led.h"
+#include "usb_device_typec.h"
 #include "usb_host_max3421.h"
 #include "usb_host_task.h"
 #include "wifi_credentials.h"
@@ -55,19 +56,34 @@ void app_main(void)
         esp_restart();
     }
 
-    if (usb_host_task_start() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start USB host task. Restarting in 5s...");
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        esp_restart();
-    }
-
-    // MAX3421E/TinyUSB USB Host path (mds/2026-08-23_filter_conv_router_with_max3421.md):
-    // runs unconditionally alongside the native OTG Host path above, not
-    // yet auto-detected/fallback-gated - both funnel into the same
-    // hid_forwarder.c pipeline. Not fatal if it fails/no MAX3421E is
-    // wired - see usb_host_max3421.h.
-    if (usb_host_max3421_task_start() != ESP_OK) {
-        ESP_LOGW(TAG, "MAX3421 USB host task failed to start (not fatal - continuing with native OTG Host only)");
+    // Exactly one Host backend runs, never both - see usb_host_max3421.h
+    // and mds/2026-08-23_filter_conv_router_with_max3421.md. If MAX3421E
+    // is present, native OTG is deliberately left unused so it's free for
+    // a future USB Device (type-c) output path (Phase2); otherwise fall
+    // back to native OTG as before. Both backends funnel into the same
+    // hid_forwarder.c pipeline either way.
+    if (usb_host_max3421_probe()) {
+        ESP_LOGI(TAG, "MAX3421E detected - using SPI USB Host backend");
+        // The native OTG port is free now (MAX3421E is doing Host duty
+        // over SPI instead) - bring it up as a type-c USB Device output
+        // (Phase2, mds/2026-08-23_filter_conv_router_with_max3421.md).
+        // Not fatal if it fails: hid_forwarder.c falls back to UDP-only
+        // when usb_device_typec_connected() is false.
+        if (usb_device_typec_start() != ESP_OK) {
+            ESP_LOGW(TAG, "type-c USB Device output failed to start (not fatal - continuing UDP-only)");
+        }
+        if (usb_host_max3421_task_start() != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start MAX3421 USB host task. Restarting in 5s...");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            esp_restart();
+        }
+    } else {
+        ESP_LOGI(TAG, "No MAX3421E detected - using native OTG USB Host backend");
+        if (usb_host_task_start() != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start USB host task. Restarting in 5s...");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            esp_restart();
+        }
     }
 
     status_led_set(true);

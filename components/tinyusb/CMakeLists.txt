@@ -37,12 +37,23 @@ set(includes_public
 # nothing in the Host role's own code (main_host.c/usb_host_task.c)
 # calls into tinyusb's device API anyway.
 if(KVM_ROLE STREQUAL "HOST")
+    # Dual rhport: rhport0 = native OTG as a Device (usb_device_typec.c,
+    # Phase2 type-c output - only actually started at runtime if MAX3421E
+    # is present, see main_host.c), rhport1 = MAX3421E as Host (see
+    # CFG_TUSB_RHPORT0_MODE/RHPORT1_MODE in host_config/tusb_config.h).
+    # Both halves are always compiled in together since TinyUSB's role
+    # split is a compile-time config, not a runtime choice - only which
+    # one(s) actually get initialized is runtime (main_host.c).
     set(srcs
         "src/common/tusb_fifo.c"
         "src/host/usbh.c"
         "src/host/hub.c"
         "src/class/hid/hid_host.c"
         "src/portable/analog/max3421/hcd_max3421.c"
+        "src/class/hid/hid_device.c"
+        "src/portable/synopsys/dwc2/dcd_dwc2.c"
+        "src/portable/synopsys/dwc2/dwc2_common.c"
+        "src/device/usbd.c"
         "src/tusb.c"
         )
 else()
@@ -99,7 +110,10 @@ if(KVM_ROLE STREQUAL "HOST")
     # tusb_config.h injection regardless of component processing order -
     # see host_config/tusb_config.h and the block comment above.
     target_include_directories(${COMPONENT_LIB} BEFORE PRIVATE "host_config")
-else()
-    # when no builtin class driver is enabled, an uint8_t data compared with `BUILTIN_DRIVER_COUNT` will always be false
-    set_source_files_properties("src/device/usbd.c" PROPERTIES COMPILE_FLAGS "-Wno-type-limits")
 endif()
+
+# when few enough builtin class drivers are enabled, a uint8_t data
+# compared with `BUILTIN_DRIVER_COUNT` will always be false - true for
+# both roles now that Host role also compiles usbd.c (single HID class
+# driver, for the type-c output - see usb_device_typec.c).
+set_source_files_properties("src/device/usbd.c" PROPERTIES COMPILE_FLAGS "-Wno-type-limits")

@@ -5,15 +5,19 @@
 #include "esp_err.h"
 
 /**
- * Host role only (KVM_ROLE=HOST). Shared UDP-forwarding pipeline used by
+ * Host role only (KVM_ROLE=HOST). Shared forwarding pipeline used by
  * both USB Host backends (native OTG - usb_host_task.c - and MAX3421E/
  * TinyUSB - usb_host_max3421.c, see
  * mds/2026-08-23_filter_conv_router_with_max3421.md). Owns the UDP
- * socket, filter_rules.h application, and the merged-keyboard-state
- * logic (a physical keyboard's own keys and mouse-triggered synthetic
- * keys - e.g. back/forward -> Alt+arrow - have to be combined into one
- * report, since the UDP protocol carries full state, not deltas - same
- * as server.py's InputState).
+ * socket, filter_rules.h application, the merged-keyboard-state logic (a
+ * physical keyboard's own keys and mouse-triggered synthetic keys - e.g.
+ * back/forward -> Alt+arrow - have to be combined into one report, since
+ * the UDP protocol carries full state, not deltas - same as server.py's
+ * InputState), and (Phase2, MAX3421E backend only) routing between UDP
+ * and the type-c USB Device output (usb_device_typec.h): while type-c is
+ * connected, every report goes there, and route_rules.h decides whether
+ * it *also* gets mirrored over UDP; otherwise everything goes over UDP,
+ * same as before Phase2.
  *
  * Each backend only does its own device enumeration/report parsing -
  * once a sample is decoded (buttons/dx/dy/wheel/pan, modifiers/keycodes,

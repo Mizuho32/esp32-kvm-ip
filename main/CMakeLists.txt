@@ -18,6 +18,8 @@ if(KVM_ROLE STREQUAL "HOST")
             "main_host.c"
             "usb_host_task.c"
             "usb_host_max3421.c"
+            "usb_device_typec.c"
+            "usb_descriptors.c"
             "hid_forwarder.c"
             "hid_report_parser.c"
             "wifi_manager.c"

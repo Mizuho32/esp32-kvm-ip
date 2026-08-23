@@ -1,6 +1,8 @@
 #ifndef USB_HOST_MAX3421_H
 #define USB_HOST_MAX3421_H
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 
 /**
@@ -17,15 +19,34 @@
  * this mirrors), so - unlike usb_host_task.c - carries no workaround for
  * the wireless dongle's 3-byte truncation quirk.
  *
- * NOT yet auto-detected/gated behind a fallback to usb_host_task.c's
- * native OTG path (see the md's Phase1 step 4/5 for that) - both run
- * unconditionally side by side for now.
+ * Mutually exclusive with usb_host_task.c's native OTG path - see
+ * usb_host_max3421_probe() below. main_host.c starts exactly one of the
+ * two backends at boot, never both, so that when MAX3421E is present the
+ * native OTG peripheral is left free for a future USB Device (type-c)
+ * output path - mds/2026-08-23_filter_conv_router_with_max3421.md's
+ * Phase2.
+ */
+
+/**
+ * Probes for a MAX3421E on the configured SPI/GPIO pins (see
+ * MAX3421_PIN_* in usb_host_max3421.c): initializes the SPI bus/GPIOs if
+ * not already done, then reads the chip's REVISION register directly
+ * (bypassing the TinyUSB driver, which isn't initialized yet at this
+ * point) and checks it against the known-valid values (0x01/0x12/0x13).
  *
- * Safe to call even with no MAX3421E actually wired up: SPI bus init
- * doesn't require a device to be present, and the background task just
- * logs an initialization failure instead of crashing anything else.
+ * Call this once at boot, before deciding whether to start this backend
+ * or usb_host_task.c's native OTG backend - see main_host.c. Safe to
+ * call with no MAX3421E wired up: just returns false.
  *
- * @return ESP_OK on success (SPI bus + host task started).
+ * @return true if a MAX3421E responded, false otherwise.
+ */
+bool usb_host_max3421_probe(void);
+
+/**
+ * Starts the MAX3421E Host backend's background task. Only call this
+ * after usb_host_max3421_probe() returned true - see main_host.c.
+ *
+ * @return ESP_OK on success (host task started).
  */
 esp_err_t usb_host_max3421_task_start(void);
 

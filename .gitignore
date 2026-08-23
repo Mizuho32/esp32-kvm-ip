@@ -39,6 +39,9 @@ main/wifi_credentials.h
 # Local filter/conv rules (see main/filter_rules.h.example)
 main/filter_rules.h
 
+# Local route rules (see main/route_rules.h.example)
+main/route_rules.h
+
 # ESP-IDF dependencies
 # For older versions or manual component management
 /components/.idf/
