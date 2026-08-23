@@ -129,6 +129,21 @@ static bridge_mouse_state_t *find_mouse_device(uint8_t dev_addr, uint8_t idx)
 
 static bridge_mouse_state_t *register_mouse_device(uint8_t dev_addr, uint8_t idx)
 {
+    // Idempotent: the RP2040 side periodically re-announces its
+    // currently-mounted devices (so this ESP32 side learns about them
+    // even if it reboots mid-session, e.g. reflashing firmware, while
+    // RP2040 itself keeps running - see
+    // mds/2026-08-23_rp2040_as_host_bridge_plan.md). Without this check,
+    // every re-announcement would append a fresh duplicate entry until
+    // MAX_MOUSE_DEVICES filled up and further (re-)mounts silently
+    // failed.
+    bridge_mouse_state_t *existing = find_mouse_device(dev_addr, idx);
+    if (existing) {
+        memset(existing, 0, sizeof(*existing));
+        existing->dev_addr = dev_addr;
+        existing->idx      = idx;
+        return existing;
+    }
     if (s_mouse_device_count >= MAX_MOUSE_DEVICES) {
         return NULL;
     }
@@ -161,6 +176,14 @@ static bridge_consumer_state_t *find_consumer_device(uint8_t dev_addr, uint8_t i
 
 static bridge_consumer_state_t *register_consumer_device(uint8_t dev_addr, uint8_t idx)
 {
+    // Idempotent - see register_mouse_device()'s comment.
+    bridge_consumer_state_t *existing = find_consumer_device(dev_addr, idx);
+    if (existing) {
+        memset(existing, 0, sizeof(*existing));
+        existing->dev_addr = dev_addr;
+        existing->idx      = idx;
+        return existing;
+    }
     if (s_consumer_device_count >= MAX_CONSUMER_DEVICES) {
         return NULL;
     }
@@ -275,6 +298,15 @@ static void dispatch_umount(uint8_t dev_addr, uint8_t idx)
 static void dispatch_report(uint8_t dev_addr, uint8_t idx, uint8_t itf_protocol,
                            const uint8_t *report, uint16_t len)
 {
+    // Debug aid - see usb_host_max3421.c's equivalent toggle. Confirms
+    // whether a REPORT frame actually arrived intact over UART (checksum
+    // passed) before it gets this far - comment back out once confirmed
+    // stable.
+    //*
+    ESP_LOGI(TAG, "[%d:%d] raw report (%d bytes):", dev_addr, idx, (int)len);
+    ESP_LOG_BUFFER_HEX(TAG, report, len);
+    //*/
+
     if (itf_protocol == ITF_PROTOCOL_KEYBOARD) {
         handle_keyboard_report(report, len);
     } else if (itf_protocol == ITF_PROTOCOL_MOUSE) {

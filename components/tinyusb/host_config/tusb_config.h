@@ -26,6 +26,25 @@
 #define CFG_TUSB_RHPORT0_MODE   (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
 #define CFG_TUSB_RHPORT1_MODE   (OPT_MODE_HOST | OPT_MODE_FULL_SPEED)
 
+// Was missing entirely, silently defaulting to OPT_OS_NONE (tusb_option.h's
+// #ifndef fallback) even though this project runs under FreeRTOS. That
+// default made TinyUSB's OSAL layer use osal_none.h's "bare metal"
+// implementations instead of osal_freertos.h's - in particular,
+// osal_none.h's queue (used by tud_task_ext()'s event loop, so on every
+// single iteration) locks by disabling/re-enabling the actual USB
+// interrupt via esp_intr_alloc()/esp_intr_free() (usbd_int_set() ->
+// dcd_int_enable()/dcd_int_disable()) instead of a real RTOS
+// primitive - esp_intr_alloc()/free() are one-time setup/teardown calls,
+// not designed to be hammered many times a second, and doing so raced
+// and double-freed the same handle (`assert failed: tlsf_free ...
+// block already marked as free`) - see
+// mds/2026-08-23_rp2040_as_host_bridge_plan.md for the full chase (this
+// never surfaced with MAX3421E alone since that backend never ran
+// tud_task() at all - only once usb_device_typec.c's type-c output
+// started actually pumping HID reports did tud_task_ext() run often
+// enough to hit it).
+#define CFG_TUSB_OS             OPT_OS_FREERTOS
+
 // ── rhport0: Device (type-c output, main/usb_device_typec.c) ──────────
 // Single HID interface set (keyboard/mouse/Consumer Control - see
 // main/usb_descriptors.h, reused as-is from the Device role). Values

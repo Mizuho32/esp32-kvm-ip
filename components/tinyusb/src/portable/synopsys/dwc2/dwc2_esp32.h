@@ -115,12 +115,31 @@ TU_ATTR_ALWAYS_INLINE static inline void dwc2_clock_init(uint8_t rhport, tusb_ro
   (void) role;
 }
 
+// Idempotent - unlike upstream, which unconditionally calls
+// esp_intr_alloc()/esp_intr_free() every time regardless of whether
+// usb_ih[rhport] is already allocated/already freed. Root cause of why
+// this ever mattered (mds/2026-08-23_rp2040_as_host_bridge_plan.md):
+// CFG_TUSB_OS was missing from tusb_config.h, silently defaulting to
+// OPT_OS_NONE - whose osal_none.h queue implementation locks by
+// disabling/re-enabling this very interrupt (via dcd_int_enable()/
+// dcd_int_disable(), called from every single tud_task_ext() loop
+// iteration) instead of a real FreeRTOS primitive. esp_intr_alloc()/
+// esp_intr_free() are one-time setup/teardown calls, not meant to be
+// hammered many times a second, and doing so raced and double-freed the
+// same handle. Fixed at the source by setting
+// CFG_TUSB_OS=OPT_OS_FREERTOS - this guard is kept as cheap
+// defense-in-depth, not the actual fix.
 TU_ATTR_ALWAYS_INLINE static inline void dwc2_int_set(uint8_t rhport, tusb_role_t role, bool enabled) {
   if (enabled) {
-    esp_intr_alloc(_dwc2_controller[rhport].irqnum, ESP_INTR_FLAG_LOWMED,
-                   dwc2_int_handler_wrap, (void*)(uintptr_t)tu_u16(role, rhport), &usb_ih[rhport]);
+    if (usb_ih[rhport] == NULL) {
+      esp_intr_alloc(_dwc2_controller[rhport].irqnum, ESP_INTR_FLAG_LOWMED,
+                     dwc2_int_handler_wrap, (void*)(uintptr_t)tu_u16(role, rhport), &usb_ih[rhport]);
+    }
   } else {
-    esp_intr_free(usb_ih[rhport]);
+    if (usb_ih[rhport] != NULL) {
+      esp_intr_free(usb_ih[rhport]);
+      usb_ih[rhport] = NULL;
+    }
   }
 }
 
