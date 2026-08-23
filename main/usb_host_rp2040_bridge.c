@@ -86,6 +86,7 @@ static volatile uint32_t s_queue_drop_count;
 // two consecutive REPORT frames reaching here, reset every print window.
 static int64_t  s_last_report_time_us;
 static uint32_t s_min_interval_us;
+static uint32_t s_max_interval_us; // the "quiet gap" size, if delivery is bursty
 #endif
 
 // dispatch_mount()/dispatch_report()/etc. below can block for a while -
@@ -456,6 +457,9 @@ static void handle_frame(void)
                 if (s_min_interval_us == 0 || interval < s_min_interval_us) {
                     s_min_interval_us = (uint32_t)interval;
                 }
+                if (interval > s_max_interval_us) {
+                    s_max_interval_us = (uint32_t)interval;
+                }
             }
             s_last_report_time_us = now_us;
         }
@@ -573,12 +577,14 @@ static void bridge_task(void *arg)
             uint32_t fails = s_checksum_fail_count;
             uint32_t drops = s_queue_drop_count;
             uint32_t min_interval = s_min_interval_us;
+            uint32_t max_interval = s_max_interval_us;
             s_report_count = 0;
             s_checksum_fail_count = 0;
             s_queue_drop_count = 0;
             s_min_interval_us = 0;
-            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec, %u queue drops/sec, min interval %uus",
-                     (unsigned)reports, (unsigned)fails, (unsigned)drops, (unsigned)min_interval);
+            s_max_interval_us = 0;
+            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec, %u queue drops/sec, min interval %uus, max interval %uus",
+                     (unsigned)reports, (unsigned)fails, (unsigned)drops, (unsigned)min_interval, (unsigned)max_interval);
         }
 #endif
     }

@@ -229,6 +229,23 @@ esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    // Default STA power-save (WIFI_PS_MIN_MODEM) puts the radio to sleep
+    // between each AP beacon and wakes on the AP's DTIM interval (often
+    // ~100ms) to check for buffered traffic - during that wake/service
+    // window the WiFi driver's own (high-priority) tasks can preempt
+    // everything else for a few ms at a time. mds/2026-08-24_rp2040_bridge_fps_investigation.md's
+    // follow-up measured exactly that shape on the Host role: an
+    // average ~100 HID reports/sec that looked healthy per-second, but a
+    // 12us *minimum* gap between two consecutive reports (i.e. several
+    // processed back-to-back in a catch-up burst) - consistent with
+    // bridge_task periodically being starved for tens of ms at a time
+    // and draining a backlog once rescheduled, which would explain a
+    // visibly choppy ~10-20Hz cursor despite ~100Hz of data actually
+    // flowing. This call disables power-save entirely (radio always on)
+    // - higher power draw, but this project already assumes a
+    // permanently-powered board, not a battery one.
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+
     ESP_LOGI(TAG, "Connecting to '%s'%s...", ssid,
              s_fast_connect ? " (fast reconnect)" : "");
 
