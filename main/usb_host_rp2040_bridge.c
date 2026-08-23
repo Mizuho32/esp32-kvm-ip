@@ -14,14 +14,16 @@
 
 #define TAG "USBHOST_RP2040BRIDGE"
 
-// Placeholder pins - adjust to match actual wiring, same as
-// usb_host_max3421.c's MAX3421_PIN_*. Deliberately different from the
-// MAX3421 SPI/GPIO pins (4,5,6,7,8,9) and the debug UART0 (43,44) so
-// both can be wired at once if ever needed (only one backend actually
-// runs at a time - see main_host.c).
+// Actual wiring - adjust to match yours, same as usb_host_max3421.c's
+// MAX3421_PIN_*. GPIO17/18 don't exist on ESP32-S3 (only up to ~GPIO21,
+// with some numbers skipped) - moved to GPIO5/6, which happens to
+// overlap MAX3421_PIN_RST/MAX3421_PIN_INT in usb_host_max3421.c. That's
+// fine: only one Host backend is ever wired/running at a time (see
+// main_host.c) - this is no longer meant to coexist with a wired-up
+// MAX3421E on the same board.
 #define BRIDGE_UART_PORT  UART_NUM_1
-#define BRIDGE_UART_TX_PIN 17
-#define BRIDGE_UART_RX_PIN 18
+#define BRIDGE_UART_TX_PIN 5
+#define BRIDGE_UART_RX_PIN 6
 #define BRIDGE_UART_BAUD  460800
 
 // Frame format (see mds/2026-08-23_rp2040_as_host_bridge_plan.md):
