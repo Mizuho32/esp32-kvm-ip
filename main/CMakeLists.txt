@@ -17,6 +17,7 @@ if(KVM_ROLE STREQUAL "HOST")
         SRCS
             "main_host.c"
             "usb_host_task.c"
+            "usb_host_max3421.c"
             "hid_report_parser.c"
             "wifi_manager.c"
             "status_led.c"
@@ -28,6 +29,7 @@ if(KVM_ROLE STREQUAL "HOST")
             esp_event
             lwip
             esp_driver_gpio
+            esp_driver_spi
             usb
     )
 elseif(KVM_ROLE STREQUAL "DEVICE")

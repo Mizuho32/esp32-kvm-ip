@@ -13,6 +13,7 @@
 
 #include "protocol.h"
 #include "status_led.h"
+#include "usb_host_max3421.h"
 #include "usb_host_task.h"
 #include "wifi_credentials.h"
 #include "wifi_manager.h"
@@ -51,6 +52,14 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to start USB host task. Restarting in 5s...");
         vTaskDelay(pdMS_TO_TICKS(5000));
         esp_restart();
+    }
+
+    // Phase 1 smoke test (mds/2026-08-23_filter_conv_router_with_max3421.md):
+    // runs unconditionally alongside the native OTG Host path above, not
+    // yet auto-detected/fallback-gated. Not fatal if it fails/no MAX3421E
+    // is wired - see usb_host_max3421.h.
+    if (usb_host_max3421_task_start() != ESP_OK) {
+        ESP_LOGW(TAG, "MAX3421 USB host task failed to start (not fatal - continuing with native OTG Host only)");
     }
 
     status_led_set(true);
