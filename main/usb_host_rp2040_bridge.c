@@ -633,6 +633,20 @@ static void bridge_task(void *arg)
             ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec, %u queue drops/sec, min interval %uus, max interval %uus, max loop gap %uus",
                      (unsigned)reports, (unsigned)fails, (unsigned)drops, (unsigned)min_interval, (unsigned)max_interval,
                      (unsigned)loop_gap_print);
+
+            // A loop gap far beyond uart_read_bytes()'s own 20ms
+            // timeout means something else held the CPU long enough to
+            // starve this (priority 6) task - dump per-task runtime
+            // stats (sdkconfig.defaults: CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS)
+            // to see which task actually consumed that time. Only when
+            // it happens (not every window) since vTaskGetRunTimeStats()
+            // itself isn't free and this is diagnostic-only.
+            if (loop_gap_print > 5000) {
+                static char stats_buf[1024];
+                vTaskGetRunTimeStats(stats_buf);
+                ESP_LOGW(TAG, "[rate] loop gap %uus - task runtime stats (name/abs-time/%%):\n%s",
+                         (unsigned)loop_gap_print, stats_buf);
+            }
         }
 #endif
     }
