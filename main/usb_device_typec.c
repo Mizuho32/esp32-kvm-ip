@@ -3,6 +3,8 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
 
@@ -67,27 +69,35 @@ bool usb_device_typec_connected(void)
     return s_started && tud_mounted();
 }
 
-// Debug aid - see usb_host_rp2040_bridge.c's/usb_host_max3421.c's
-// equivalent raw-report dump toggles. Logs why a report got dropped
-// (not connected vs. endpoint not ready are different failure modes -
-// the former means tud_mounted() is false, the latter means the host
-// hasn't picked up the previous report yet) or, if it was actually
-// attempted, whether tud_hid_n_report() itself reports success.
-// Comment back out once confirmed stable.
-static bool log_send_precheck(const char *what, uint8_t itf_num)
+// Debug toggle for the sent=/dropped= logging that used to be here - see
+// usb_host_rp2040_bridge.c's/usb_host_max3421.c's equivalent raw-report
+// dump toggles. Off by default (was on while chasing the type-c crash,
+// mds/2026-08-23_rp2040_host_status.md).
+#define USB_DEVICE_TYPEC_DEBUG 0
+
+// Waits for the endpoint to actually be free rather than silently
+// dropping the report when it isn't yet - mirrors hid_task.c's
+// wait_for_hid_ready() (Device role). Dropping (the previous behavior
+// here) permanently loses that report's relative mouse dx/dy, since
+// unlike UDP (which has no such backpressure at all and just fires
+// every sample) there's no later retransmission - this made on-screen
+// cursor movement via type-c feel smaller than the same physical mouse
+// motion via UDP. Bails out (returns false) if the connection drops
+// mid-wait instead of blocking forever.
+static bool wait_for_ready(uint8_t itf_num)
 {
-    bool connected = usb_device_typec_connected();
-    bool ready = tud_hid_n_ready(itf_num);
-    if (!connected || !ready) {
-        ESP_LOGW(TAG, "%s dropped: connected=%d ready=%d", what, connected, ready);
-        return false;
+    while (usb_device_typec_connected()) {
+        if (tud_hid_n_ready(itf_num)) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
-    return true;
+    return false;
 }
 
 void usb_device_typec_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6])
 {
-    if (!log_send_precheck("keyboard report", ITF_NUM_KEYBOARD)) {
+    if (!wait_for_ready(ITF_NUM_KEYBOARD)) {
         return;
     }
     hid_keyboard_report_t report = {
@@ -96,12 +106,16 @@ void usb_device_typec_keyboard_report(uint8_t modifiers, const uint8_t keycodes[
     };
     memcpy(report.keycode, keycodes, 6);
     bool sent = tud_hid_n_report(ITF_NUM_KEYBOARD, 0, &report, sizeof(report));
+#if USB_DEVICE_TYPEC_DEBUG
     ESP_LOGI(TAG, "keyboard report sent=%d modifiers=0x%02x", sent, modifiers);
+#else
+    (void)sent;
+#endif
 }
 
 void usb_device_typec_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
 {
-    if (!log_send_precheck("mouse report", ITF_NUM_MOUSE)) {
+    if (!wait_for_ready(ITF_NUM_MOUSE)) {
         return;
     }
     // Mirrors hid_task.c: Boot Protocol (BIOS/bootloader) gets the fixed
@@ -127,17 +141,25 @@ void usb_device_typec_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8
         };
         sent = tud_hid_n_report(ITF_NUM_MOUSE, 0, &report, sizeof(report));
     }
+#if USB_DEVICE_TYPEC_DEBUG
     ESP_LOGI(TAG, "mouse report sent=%d buttons=0x%02x dx=%d dy=%d", sent, buttons, dx, dy);
+#else
+    (void)sent;
+#endif
 }
 
 void usb_device_typec_consumer_report(uint16_t usage_id)
 {
-    if (!log_send_precheck("consumer report", ITF_NUM_CONSUMER)) {
+    if (!wait_for_ready(ITF_NUM_CONSUMER)) {
         return;
     }
     consumer_report_t report = {
         .usage_id = usage_id,
     };
     bool sent = tud_hid_n_report(ITF_NUM_CONSUMER, 0, &report, sizeof(report));
+#if USB_DEVICE_TYPEC_DEBUG
     ESP_LOGI(TAG, "consumer report sent=%d usage_id=0x%04x", sent, usage_id);
+#else
+    (void)sent;
+#endif
 }

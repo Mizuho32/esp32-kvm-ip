@@ -300,9 +300,11 @@ static void dispatch_report(uint8_t dev_addr, uint8_t idx, uint8_t itf_protocol,
 {
     // Debug aid - see usb_host_max3421.c's equivalent toggle. Confirms
     // whether a REPORT frame actually arrived intact over UART (checksum
-    // passed) before it gets this far - comment back out once confirmed
-    // stable.
-    //*
+    // passed) before it gets this far. Toggled OFF (was toggled on while
+    // chasing the type-c crash, mds/2026-08-23_rp2040_host_status.md) -
+    // suspected contributor to the type-c latency being worse than UDP
+    // (synchronous UART0/console log output on every single report).
+    /*
     ESP_LOGI(TAG, "[%d:%d] raw report (%d bytes):", dev_addr, idx, (int)len);
     ESP_LOG_BUFFER_HEX(TAG, report, len);
     //*/
