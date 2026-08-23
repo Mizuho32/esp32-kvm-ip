@@ -583,8 +583,33 @@ static void bridge_task(void *arg)
     uint8_t buf[64];
 #if BRIDGE_RATE_MONITOR
     TickType_t last_print = xTaskGetTickCount();
+    // RP2040 itself (rp2040_host_bridge.ino's own RATE_MONITOR, checked
+    // directly over its Serial2 debug port) measured a rock-solid
+    // ~10000us +-6us report cadence with zero bursting -
+    // mds/2026-08-24_rp2040_bridge_fps_investigation.md follow-up. That
+    // clears the RP2040/mouse/dongle entirely, meaning the ~12-50us min
+    // / ~50ms max interval spread measured *here* has to come from this
+    // task not getting scheduled promptly, not from data arriving late.
+    // Tracks the longest gap between the start of two consecutive
+    // while(1) iterations - each iteration should normally take well
+    // under uart_read_bytes()'s own 20ms timeout, since new bytes are
+    // arriving every ~10ms; a gap far beyond that is this task sitting
+    // ready-to-run but not actually getting CPU time, i.e. direct
+    // evidence of external starvation (candidates: WiFi/lwIP internal
+    // tasks, USB ISR load, something else) rather than anything wrong
+    // with this task's own logic.
+    int64_t  last_loop_us = esp_timer_get_time();
+    uint32_t max_loop_gap_us = 0;
 #endif
     while (1) {
+#if BRIDGE_RATE_MONITOR
+        int64_t loop_now_us = esp_timer_get_time();
+        uint32_t loop_gap = (uint32_t)(loop_now_us - last_loop_us);
+        if (loop_gap > max_loop_gap_us) {
+            max_loop_gap_us = loop_gap;
+        }
+        last_loop_us = loop_now_us;
+#endif
         int n = uart_read_bytes(BRIDGE_UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(20));
         for (int i = 0; i < n; i++) {
             feed_byte(buf[i]);
@@ -598,13 +623,16 @@ static void bridge_task(void *arg)
             uint32_t drops = s_queue_drop_count;
             uint32_t min_interval = s_min_interval_us;
             uint32_t max_interval = s_max_interval_us;
+            uint32_t loop_gap_print = max_loop_gap_us;
             s_report_count = 0;
             s_checksum_fail_count = 0;
             s_queue_drop_count = 0;
             s_min_interval_us = 0;
             s_max_interval_us = 0;
-            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec, %u queue drops/sec, min interval %uus, max interval %uus",
-                     (unsigned)reports, (unsigned)fails, (unsigned)drops, (unsigned)min_interval, (unsigned)max_interval);
+            max_loop_gap_us = 0;
+            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec, %u queue drops/sec, min interval %uus, max interval %uus, max loop gap %uus",
+                     (unsigned)reports, (unsigned)fails, (unsigned)drops, (unsigned)min_interval, (unsigned)max_interval,
+                     (unsigned)loop_gap_print);
         }
 #endif
     }
