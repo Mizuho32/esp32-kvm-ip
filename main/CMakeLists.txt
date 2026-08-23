@@ -34,13 +34,15 @@ if(KVM_ROLE STREQUAL "HOST")
             lwip
             esp_driver_gpio
             esp_driver_spi
+            esp_timer
     )
-    # esp_driver_uart (usb_host_rp2040_bridge.c's driver/uart.h) doesn't
-    # get its include dir propagated to this component via PRIV_REQUIRES
+    # esp_driver_uart (usb_host_rp2040_bridge.c's driver/uart.h) and now
+    # esp_timer (its esp_timer.h, for esp_timer_get_time()) don't get
+    # their include dirs propagated to this component via PRIV_REQUIRES
     # above for reasons that didn't resolve after a full clean reconfigure
     # (esp_driver_gpio/esp_driver_spi in the same list work fine) - linked
     # explicitly instead as a workaround.
-    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart idf::esp_timer)
 elseif(KVM_ROLE STREQUAL "DEVICE")
     idf_component_register(
         SRCS

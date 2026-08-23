@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -72,6 +73,19 @@ typedef enum {
 static volatile uint32_t s_report_count;
 static volatile uint32_t s_checksum_fail_count;
 static volatile uint32_t s_queue_drop_count;
+// Every other counter here is a per-second average - none of them can
+// tell bursty delivery (several reports arriving almost back-to-back,
+// then a longer gap) from perfectly even ~10ms-spaced delivery, even
+// though both would average to the same ~100/sec. A visibly choppy
+// cursor despite every measured stage succeeding (0 checksum failures,
+// 0 queue drops, 0 tud_hid_n_report() submit failures - see
+// usb_device_typec.c) is exactly what bursty delivery would look like:
+// several reports processed and submitted within a few ms of each
+// other (indistinguishable from healthy here), followed by a gap far
+// longer than the nominal ~10ms period. Tracks the shortest gap between
+// two consecutive REPORT frames reaching here, reset every print window.
+static int64_t  s_last_report_time_us;
+static uint32_t s_min_interval_us;
 #endif
 
 // dispatch_mount()/dispatch_report()/etc. below can block for a while -
@@ -436,6 +450,14 @@ static void handle_frame(void)
 #if BRIDGE_RATE_MONITOR
         if (s_msg_type == BRIDGE_MSG_REPORT) {
             s_report_count++;
+            int64_t now_us = esp_timer_get_time();
+            if (s_last_report_time_us != 0) {
+                int64_t interval = now_us - s_last_report_time_us;
+                if (s_min_interval_us == 0 || interval < s_min_interval_us) {
+                    s_min_interval_us = (uint32_t)interval;
+                }
+            }
+            s_last_report_time_us = now_us;
         }
 #endif
         // Hand off to dispatch_task() rather than calling
@@ -550,11 +572,13 @@ static void bridge_task(void *arg)
             uint32_t reports = s_report_count;
             uint32_t fails = s_checksum_fail_count;
             uint32_t drops = s_queue_drop_count;
+            uint32_t min_interval = s_min_interval_us;
             s_report_count = 0;
             s_checksum_fail_count = 0;
             s_queue_drop_count = 0;
-            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec, %u queue drops/sec",
-                     (unsigned)reports, (unsigned)fails, (unsigned)drops);
+            s_min_interval_us = 0;
+            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec, %u queue drops/sec, min interval %uus",
+                     (unsigned)reports, (unsigned)fails, (unsigned)drops, (unsigned)min_interval);
         }
 #endif
     }
