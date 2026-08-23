@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "class/hid/hid.h" // hid_keyboard_report_t / hid_mouse_report_t only - no tuh_*/tud_* dependency
@@ -70,7 +71,48 @@ typedef enum {
 #if BRIDGE_RATE_MONITOR
 static volatile uint32_t s_report_count;
 static volatile uint32_t s_checksum_fail_count;
+static volatile uint32_t s_queue_drop_count;
 #endif
+
+// dispatch_mount()/dispatch_report()/etc. below can block for a while -
+// dispatch_report() -> hid_forwarder_mouse_sample() ->
+// usb_device_typec_mouse_report() -> wait_for_ready() blocks on
+// tud_hid_n_ready() whenever type-c is connected but the PC hasn't
+// polled the IN endpoint yet (usb_device_typec.c). Measuring
+// BRIDGE_RATE_MONITOR's counters at the *point where handle_frame()
+// used to call dispatch_*() directly* (i.e. from the same task that
+// also calls uart_read_bytes()) showed the reports/sec actually
+// reaching here dropping far below what the RP2040 side independently
+// measured itself sending (~100Hz, 0 drops -
+// mds/2026-08-24_rp2040_bridge_fps_investigation.md) - with zero
+// checksum failures the whole time. That combination means bytes were
+// being lost *before* ever reaching feed_byte()'s state machine (a
+// checksum failure only fires for a byte stream that did reach the
+// parser but didn't match) - i.e. the fixed-size UART RX ring buffer
+// (uart_driver_install() above) was overflowing and silently dropping
+// incoming bytes at the driver/hardware level while this task sat
+// blocked inside dispatch_report() instead of calling
+// uart_read_bytes() again.
+//
+// Fix: decouple parsing (bridge_task(), below - always keeps draining
+// UART, never calls into dispatch_*()) from forwarding (dispatch_task(),
+// further below - does the actual, possibly-blocking work) via a queue.
+// If the queue is ever full (dispatch genuinely can't keep up),
+// xQueueSend()'s 0 timeout just drops that one new frame rather than
+// blocking the sender - see s_queue_drop_count above - which only loses
+// forwarded HID data, never corrupts/desyncs the raw byte stream
+// feeding the parser.
+typedef struct {
+    uint8_t  msg_type;
+    uint8_t  dev_addr;
+    uint8_t  idx;
+    uint8_t  itf_protocol;
+    uint16_t len;
+    uint8_t  payload[MAX_PAYLOAD_LEN];
+} bridge_frame_t;
+
+#define FRAME_QUEUE_DEPTH 8
+static QueueHandle_t s_frame_queue;
 
 static bool s_uart_initialized;
 
@@ -78,6 +120,19 @@ static esp_err_t bridge_uart_init(void)
 {
     if (s_uart_initialized) {
         return ESP_OK;
+    }
+    // Created here (rather than in usb_host_rp2040_bridge_task_start())
+    // so it exists even during usb_host_rp2040_bridge_probe() - the probe
+    // runs feed_byte() (and thus handle_frame(), which calls
+    // xQueueSend()) directly, before task_start() would otherwise have
+    // created it, and a re-announced MOUNT (or an actual REPORT, if the
+    // user happens to move the mouse during the probe's 800ms window)
+    // can arrive during that window, not just HEARTBEATs.
+    if (!s_frame_queue) {
+        s_frame_queue = xQueueCreate(FRAME_QUEUE_DEPTH, sizeof(bridge_frame_t));
+        if (!s_frame_queue) {
+            return ESP_ERR_NO_MEM;
+        }
     }
     uart_config_t cfg = {
         .baud_rate = BRIDGE_UART_BAUD,
@@ -376,17 +431,35 @@ static void handle_frame(void)
     case BRIDGE_MSG_HEARTBEAT:
         break; // probing/keepalive only
     case BRIDGE_MSG_MOUNT:
-        dispatch_mount(s_dev_addr, s_idx, s_itf_protocol, s_payload, s_payload_idx);
-        break;
     case BRIDGE_MSG_UNMOUNT:
-        dispatch_umount(s_dev_addr, s_idx);
-        break;
-    case BRIDGE_MSG_REPORT:
+    case BRIDGE_MSG_REPORT: {
 #if BRIDGE_RATE_MONITOR
-        s_report_count++;
+        if (s_msg_type == BRIDGE_MSG_REPORT) {
+            s_report_count++;
+        }
 #endif
-        dispatch_report(s_dev_addr, s_idx, s_itf_protocol, s_payload, s_payload_idx);
+        // Hand off to dispatch_task() rather than calling
+        // dispatch_mount()/dispatch_report()/etc. directly here - see the
+        // block comment above bridge_frame_t. xQueueSend() with a 0
+        // timeout never blocks this (parser) task even if dispatch_task()
+        // is itself stuck waiting on wait_for_ready().
+        bridge_frame_t frame = {
+            .msg_type     = s_msg_type,
+            .dev_addr     = s_dev_addr,
+            .idx          = s_idx,
+            .itf_protocol = s_itf_protocol,
+            .len          = s_payload_idx,
+        };
+        if (s_payload_idx > 0) {
+            memcpy(frame.payload, s_payload, s_payload_idx);
+        }
+        if (xQueueSend(s_frame_queue, &frame, 0) != pdTRUE) {
+#if BRIDGE_RATE_MONITOR
+            s_queue_drop_count++;
+#endif
+        }
         break;
+    }
     default:
         ESP_LOGW(TAG, "unknown msg_type 0x%02x, ignoring", s_msg_type);
         break;
@@ -476,11 +549,42 @@ static void bridge_task(void *arg)
             last_print = now;
             uint32_t reports = s_report_count;
             uint32_t fails = s_checksum_fail_count;
+            uint32_t drops = s_queue_drop_count;
             s_report_count = 0;
             s_checksum_fail_count = 0;
-            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec", (unsigned)reports, (unsigned)fails);
+            s_queue_drop_count = 0;
+            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec, %u queue drops/sec",
+                     (unsigned)reports, (unsigned)fails, (unsigned)drops);
         }
 #endif
+    }
+}
+
+// Runs dispatch_mount()/dispatch_umount()/dispatch_report() - the actual
+// (possibly-blocking, see the bridge_frame_t comment above) forwarding
+// work - on its own task so it can never stall bridge_task()'s UART
+// draining above.
+static void dispatch_task(void *arg)
+{
+    (void)arg;
+    bridge_frame_t frame;
+    while (1) {
+        if (xQueueReceive(s_frame_queue, &frame, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        switch (frame.msg_type) {
+        case BRIDGE_MSG_MOUNT:
+            dispatch_mount(frame.dev_addr, frame.idx, frame.itf_protocol, frame.payload, frame.len);
+            break;
+        case BRIDGE_MSG_UNMOUNT:
+            dispatch_umount(frame.dev_addr, frame.idx);
+            break;
+        case BRIDGE_MSG_REPORT:
+            dispatch_report(frame.dev_addr, frame.idx, frame.itf_protocol, frame.payload, frame.len);
+            break;
+        default:
+            break;
+        }
     }
 }
 
@@ -517,7 +621,15 @@ bool usb_host_rp2040_bridge_probe(void)
 
 esp_err_t usb_host_rp2040_bridge_task_start(void)
 {
-    if (xTaskCreate(bridge_task, "usb_host_rp2040br", 4096, NULL, 5, NULL) != pdPASS) {
+    // bridge_task (UART parsing) is a higher priority than dispatch_task
+    // (the actual, possibly-blocking forwarding work) so a stalled
+    // dispatch_task can never delay bridge_task from draining the UART
+    // RX buffer - see the bridge_frame_t comment above for why this
+    // split exists.
+    if (xTaskCreate(bridge_task, "usb_host_rp2040br", 4096, NULL, 6, NULL) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(dispatch_task, "usb_host_rp2040disp", 4096, NULL, 5, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
