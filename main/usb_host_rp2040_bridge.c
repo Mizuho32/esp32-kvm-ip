@@ -53,6 +53,25 @@ typedef enum {
 
 #define MAX_PAYLOAD_LEN 512
 
+// Toggle for a report-rate/checksum-failure counter, printed once a
+// second via ESP_LOGI (mds/2026-08-24_rp2040_bridge_fps_investigation.md
+// measurement plan, point 2). The RP2040 side's own RATE_MONITOR/
+// POLL_CEILING_TEST confirmed it emits a clean ~100Hz - this counts how
+// many REPORT frames actually reach dispatch_report() here per second,
+// and how many frames get thrown away by a checksum mismatch, to tell
+// whether the UART link between the two boards is where anything gets
+// lost/delayed. A once-a-second summary line, not a per-frame dump -
+// the per-frame raw-report dump in dispatch_report() below is what
+// perturbed timing while chasing the type-c crash
+// (mds/2026-08-23_rp2040_host_status.md); this shouldn't have that
+// problem.
+#define BRIDGE_RATE_MONITOR 1
+
+#if BRIDGE_RATE_MONITOR
+static volatile uint32_t s_report_count;
+static volatile uint32_t s_checksum_fail_count;
+#endif
+
 static bool s_uart_initialized;
 
 static esp_err_t bridge_uart_init(void)
@@ -363,6 +382,9 @@ static void handle_frame(void)
         dispatch_umount(s_dev_addr, s_idx);
         break;
     case BRIDGE_MSG_REPORT:
+#if BRIDGE_RATE_MONITOR
+        s_report_count++;
+#endif
         dispatch_report(s_dev_addr, s_idx, s_itf_protocol, s_payload, s_payload_idx);
         break;
     default:
@@ -426,6 +448,9 @@ static void feed_byte(uint8_t b)
         if (b == s_checksum) {
             handle_frame();
         } else {
+#if BRIDGE_RATE_MONITOR
+            s_checksum_fail_count++;
+#endif
             ESP_LOGW(TAG, "checksum mismatch (msg_type=0x%02x), resyncing", s_msg_type);
         }
         reset_parser();
@@ -437,11 +462,25 @@ static void bridge_task(void *arg)
 {
     (void)arg;
     uint8_t buf[64];
+#if BRIDGE_RATE_MONITOR
+    TickType_t last_print = xTaskGetTickCount();
+#endif
     while (1) {
         int n = uart_read_bytes(BRIDGE_UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(20));
         for (int i = 0; i < n; i++) {
             feed_byte(buf[i]);
         }
+#if BRIDGE_RATE_MONITOR
+        TickType_t now = xTaskGetTickCount();
+        if (now - last_print >= pdMS_TO_TICKS(1000)) {
+            last_print = now;
+            uint32_t reports = s_report_count;
+            uint32_t fails = s_checksum_fail_count;
+            s_report_count = 0;
+            s_checksum_fail_count = 0;
+            ESP_LOGI(TAG, "[rate] %u reports/sec, %u checksum failures/sec", (unsigned)reports, (unsigned)fails);
+        }
+#endif
     }
 }
 

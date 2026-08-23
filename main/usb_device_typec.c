@@ -75,6 +75,40 @@ bool usb_device_typec_connected(void)
 // mds/2026-08-23_rp2040_host_status.md).
 #define USB_DEVICE_TYPEC_DEBUG 0
 
+// Toggle for a wait_for_ready() blocking-frequency/duration counter,
+// printed once a second via ESP_LOGI
+// (mds/2026-08-24_rp2040_bridge_fps_investigation.md measurement plan,
+// point 3). RP2040-side and UART-side rates were confirmed clean (~100Hz,
+// no checksum failures) - this checks whether USB-side backpressure
+// (tud_hid_n_ready() not yet true - e.g. the PC not polling the IN
+// endpoint fast enough) is where the type-c latency actually comes from.
+// A once-a-second summary line, not per-call.
+#define USB_DEVICE_TYPEC_RATE_MONITOR 1
+
+#if USB_DEVICE_TYPEC_RATE_MONITOR
+static volatile uint32_t s_wait_calls;
+static volatile uint32_t s_wait_blocked_calls;
+static volatile uint32_t s_wait_blocked_ticks;
+
+static void maybe_print_wait_stats(void)
+{
+    static TickType_t last_print;
+    TickType_t now = xTaskGetTickCount();
+    if (now - last_print < pdMS_TO_TICKS(1000)) {
+        return;
+    }
+    last_print = now;
+    uint32_t calls   = s_wait_calls;
+    uint32_t blocked = s_wait_blocked_calls;
+    uint32_t ticks   = s_wait_blocked_ticks;
+    s_wait_calls = 0;
+    s_wait_blocked_calls = 0;
+    s_wait_blocked_ticks = 0;
+    ESP_LOGI(TAG, "[rate] wait_for_ready: %u calls/sec, %u blocked/sec, %u ms blocked/sec",
+             (unsigned)calls, (unsigned)blocked, (unsigned)(ticks * portTICK_PERIOD_MS));
+}
+#endif
+
 // Waits for the endpoint to actually be free rather than silently
 // dropping the report when it isn't yet - mirrors hid_task.c's
 // wait_for_hid_ready() (Device role). Dropping (the previous behavior
@@ -86,12 +120,27 @@ bool usb_device_typec_connected(void)
 // mid-wait instead of blocking forever.
 static bool wait_for_ready(uint8_t itf_num)
 {
+#if USB_DEVICE_TYPEC_RATE_MONITOR
+    s_wait_calls++;
+    TickType_t start = xTaskGetTickCount();
+#endif
     while (usb_device_typec_connected()) {
         if (tud_hid_n_ready(itf_num)) {
+#if USB_DEVICE_TYPEC_RATE_MONITOR
+            TickType_t elapsed = xTaskGetTickCount() - start;
+            if (elapsed > 0) {
+                s_wait_blocked_calls++;
+                s_wait_blocked_ticks += elapsed;
+            }
+            maybe_print_wait_stats();
+#endif
             return true;
         }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
+#if USB_DEVICE_TYPEC_RATE_MONITOR
+    maybe_print_wait_stats();
+#endif
     return false;
 }
 
