@@ -1,8 +1,6 @@
 #include "usb_host_task.h"
 
 #include <string.h>
-#include <stdio.h>
-#include <errno.h>
 
 #include "esp_log.h"
 #include "esp_intr_alloc.h"
@@ -10,26 +8,13 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
-#include "lwip/sockets.h"
-#include "lwip/netdb.h"
-
 #include "usb/usb_host.h"
 #include "usb/hid_host.h"
 #include "usb/hid_usage_keyboard.h"
 #include "usb/hid_usage_mouse.h"
 
-#include "protocol.h"
+#include "hid_forwarder.h"
 #include "hid_report_parser.h"
-#include "wifi_credentials.h"
-
-// filter_rules.h is a gitignored personal copy of filter_rules.h.example
-// (like wifi_credentials.h) - fall back to the tracked, pure-passthrough
-// default if it hasn't been created.
-#if __has_include("filter_rules.h")
-#include "filter_rules.h"
-#else
-#include "filter_rules_default.h"
-#endif
 
 #define TAG "USBHOST"
 
@@ -40,22 +25,6 @@
 // (filter + UDP send), matching how the official
 // examples/peripherals/usb/host/hid example structures this.
 static QueueHandle_t s_driver_event_queue;
-
-static int s_sock = -1;
-static struct sockaddr_in s_target_addr;
-static uint32_t s_seq;
-
-// Merged keyboard state: physical keyboard (handle_keyboard_report) and
-// mouse-triggered synthetic keys (e.g. back/forward -> Alt+arrow, see
-// filter_rules.h) both contribute to one combined report, the same way
-// server.py's InputState merges keyboard + paste-typing on the Windows
-// side. Without this, whichever source sent last would silently
-// overwrite the other's held keys (the UDP protocol carries full state,
-// not deltas).
-static uint8_t s_kbd_modifiers;
-static uint8_t s_kbd_keycodes[6];
-static uint8_t s_synth_modifiers;
-static uint8_t s_synth_keycode = HID_KEY_NO_PRESS;
 
 // Per-device Report Protocol layout, for mice whose HID Report
 // Descriptor parsed cleanly (see mds/2026-08-21_host_report_protocol.md).
@@ -166,140 +135,13 @@ static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
     return v;
 }
 
-static bool resolve_target(void)
-{
-    struct addrinfo hints = {
-        .ai_family   = AF_INET,
-        .ai_socktype = SOCK_DGRAM,
-    };
-    struct addrinfo *res = NULL;
-    char port_str[6];
-    snprintf(port_str, sizeof(port_str), "%d", UDP_PORT);
-
-    int err = getaddrinfo(KVM_TARGET_HOST, port_str, &hints, &res);
-    if (err != 0 || res == NULL) {
-        ESP_LOGE(TAG, "Failed to resolve KVM_TARGET_HOST '%s': %d", KVM_TARGET_HOST, err);
-        return false;
-    }
-    memcpy(&s_target_addr, res->ai_addr, sizeof(s_target_addr));
-    freeaddrinfo(res);
-    return true;
-}
-
-static void send_udp_packet(const udp_packet_t *pkt)
-{
-    if (s_sock < 0) {
-        return;
-    }
-    sendto(s_sock, pkt, PACKET_SIZE, 0, (struct sockaddr *)&s_target_addr, sizeof(s_target_addr));
-}
-
-static void send_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6])
-{
-    udp_packet_t pkt = {
-        .magic    = PACKET_MAGIC,
-        .sequence = ++s_seq,
-        .type     = EVENT_TYPE_KEYBOARD,
-    };
-    pkt.keyboard.modifiers = modifiers;
-    pkt.keyboard.reserved  = 0;
-    memcpy(pkt.keyboard.keycodes, keycodes, 6);
-    send_udp_packet(&pkt);
-}
-
-static void send_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
-{
-    udp_packet_t pkt = {
-        .magic    = PACKET_MAGIC,
-        .sequence = ++s_seq,
-        .type     = EVENT_TYPE_MOUSE,
-    };
-    pkt.mouse.buttons = buttons;
-    pkt.mouse.dx      = dx;
-    pkt.mouse.dy      = dy;
-    pkt.mouse.wheel   = wheel;
-    pkt.mouse.pan     = pan;
-    send_udp_packet(&pkt);
-}
-
-static void send_consumer_report(uint16_t usage_id)
-{
-    udp_packet_t pkt = {
-        .magic    = PACKET_MAGIC,
-        .sequence = ++s_seq,
-        .type     = EVENT_TYPE_CONSUMER,
-    };
-    pkt.consumer.usage_id = usage_id;
-    send_udp_packet(&pkt);
-}
-
-static void send_merged_keyboard_report(void)
-{
-    uint8_t modifiers = s_kbd_modifiers | s_synth_modifiers;
-    uint8_t keycodes[6];
-    memcpy(keycodes, s_kbd_keycodes, 6);
-
-    if (s_synth_keycode != HID_KEY_NO_PRESS) {
-        bool already_present = false;
-        for (int i = 0; i < 6; i++) {
-            if (keycodes[i] == s_synth_keycode) {
-                already_present = true;
-                break;
-            }
-        }
-        if (!already_present) {
-            for (int i = 0; i < 6; i++) {
-                if (keycodes[i] == HID_KEY_NO_PRESS) {
-                    keycodes[i] = s_synth_keycode;
-                    break;
-                }
-            }
-        }
-    }
-
-    send_keyboard_report(modifiers, keycodes);
-}
-
-static void apply_mouse_synth_keys(uint8_t modifiers, uint8_t keycode)
-{
-    if (modifiers == s_synth_modifiers && keycode == s_synth_keycode) {
-        return; // No change - avoid a redundant packet on every mouse report.
-    }
-    s_synth_modifiers = modifiers;
-    s_synth_keycode   = keycode;
-    send_merged_keyboard_report();
-}
-
 static void handle_keyboard_report(const uint8_t *data, size_t length)
 {
     if (length < sizeof(hid_keyboard_input_report_boot_t)) {
         return;
     }
     const hid_keyboard_input_report_boot_t *report = (const hid_keyboard_input_report_boot_t *)data;
-
-    uint8_t modifiers = report->modifier.val;
-    uint8_t keycodes[6];
-    memcpy(keycodes, report->key, sizeof(keycodes));
-
-    if (filter_keyboard_report(&modifiers, keycodes)) {
-        s_kbd_modifiers = modifiers;
-        memcpy(s_kbd_keycodes, keycodes, 6);
-        send_merged_keyboard_report();
-    }
-}
-
-// Runs a fully-decoded mouse sample (buttons/dx/dy/wheel/pan, regardless
-// of whether it came from Report or Boot Protocol) through filter_rules.h
-// and sends it on.
-static void process_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
-{
-    uint8_t synth_modifiers = 0;
-    uint8_t synth_keycode = HID_KEY_NO_PRESS;
-
-    if (filter_mouse_report(&buttons, &dx, &dy, &wheel, &pan, &synth_modifiers, &synth_keycode)) {
-        send_mouse_report(buttons, dx, dy, wheel, pan);
-    }
-    apply_mouse_synth_keys(synth_modifiers, synth_keycode);
+    hid_forwarder_keyboard_report(report->modifier.val, report->key);
 }
 
 static void handle_mouse_report_boot(const uint8_t *data, size_t length)
@@ -310,7 +152,7 @@ static void handle_mouse_report_boot(const uint8_t *data, size_t length)
     const hid_mouse_input_report_boot_t *report = (const hid_mouse_input_report_boot_t *)data;
     // Boot Protocol mice don't report wheel/pan/buttons 4+ - see
     // mds/2026-08-21_host_report_protocol.md.
-    process_mouse_sample(report->buttons.val, report->x_displacement, report->y_displacement, 0, 0);
+    hid_forwarder_mouse_sample(report->buttons.val, report->x_displacement, report->y_displacement, 0, 0);
 }
 
 static void handle_mouse_report_generic(const mouse_report_layout_t *layout, const uint8_t *data, size_t length)
@@ -338,7 +180,7 @@ static void handle_mouse_report_generic(const mouse_report_layout_t *layout, con
              buttons, dx, dy, wheel, pan);
     */
 
-    process_mouse_sample(buttons, dx, dy, wheel, pan);
+    hid_forwarder_mouse_sample(buttons, dx, dy, wheel, pan);
 }
 
 // Forwards a Consumer Control ("media keys", or a mouse's bundled
@@ -355,13 +197,13 @@ static void handle_consumer_report(const consumer_report_layout_t *layout, const
     // mds/2026-08-22_9buttons_mouse.md), so ESP_LOGD would be compiled out
     // entirely rather than just filtered at runtime; comment this out
     // instead of leaving it live, to avoid spamming every report. Keep
-    // send_consumer_report() itself outside the toggle either way.
+    // hid_forwarder_consumer() itself outside the toggle either way.
     /*
     ESP_LOGI(TAG, "Consumer report: usage_id=0x%04X (report_len=%d, selector bit_offset=%d bit_length=%d report_id=%d)",
              usage_id, (int)length, layout->selector.bit_offset,
              layout->selector.bit_length, layout->selector.report_id);
     */
-    send_consumer_report(usage_id);
+    hid_forwarder_consumer(usage_id);
 }
 
 static void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle,
@@ -424,7 +266,7 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
                     data[0] > max_boot_buttons_value) {
                     uint16_t usage_id = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
                     if (usage_id != dev->last_boot_consumer_usage) {
-                        send_consumer_report(usage_id);
+                        hid_forwarder_consumer(usage_id);
                         dev->last_boot_consumer_usage = usage_id;
                     }
                 } else if (dev && dev_params.sub_class == HID_SUBCLASS_BOOT_INTERFACE &&
@@ -442,7 +284,7 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
                     // (see mds/2026-08-22_wireless_dongle_short_reports.md).
                     if (dev->consumer_layout.selector.present &&
                         dev->last_boot_consumer_usage != 0) {
-                        send_consumer_report(0);
+                        hid_forwarder_consumer(0);
                         dev->last_boot_consumer_usage = 0;
                     }
                 } else if (dev && dev->consumer_layout.selector.present &&
@@ -688,18 +530,6 @@ static void usb_host_app_task(void *arg)
 
 esp_err_t usb_host_task_start(void)
 {
-    memset(s_kbd_keycodes, HID_KEY_NO_PRESS, sizeof(s_kbd_keycodes));
-
-    if (!resolve_target()) {
-        return ESP_FAIL;
-    }
-
-    s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s_sock < 0) {
-        ESP_LOGE(TAG, "Failed to create UDP socket: errno %d", errno);
-        return ESP_FAIL;
-    }
-
     s_driver_event_queue = xQueueCreate(10, sizeof(hid_host_device_handle_t));
     if (!s_driver_event_queue) {
         return ESP_ERR_NO_MEM;
@@ -730,6 +560,6 @@ esp_err_t usb_host_task_start(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "Forwarding USB HID input to %s:%d", KVM_TARGET_HOST, UDP_PORT);
+    ESP_LOGI(TAG, "Native OTG USB Host driver started");
     return ESP_OK;
 }

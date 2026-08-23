@@ -1,5 +1,7 @@
 #include "usb_host_max3421.h"
 
+#include <string.h>
+
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -8,6 +10,9 @@
 
 #include "host/usbh.h"
 #include "class/hid/hid_host.h"
+
+#include "hid_forwarder.h"
+#include "hid_report_parser.h"
 
 #define TAG "USBHOST_MAX3421"
 
@@ -33,9 +38,12 @@
 #define MAX3421_RHPORT    0
 
 #define MAX3421_SPI_HOST  SPI2_HOST
-// MAX3421E datasheet allows up to ~26MHz SPI; start conservative and
-// raise later once basic communication is confirmed on real hardware.
-#define MAX3421_SPI_CLOCK_HZ (10 * 1000 * 1000)
+// MAX3421E datasheet allows up to ~26MHz SPI, but that's optimistic over
+// breadboard jumper wires - 10MHz was unreliable (devices mounting then
+// unmounting almost immediately). Empirically, 5MHz turned out more
+// stable than 1MHz on this wiring (not obviously lower is better) - see
+// mds/2026-08-23_filter_conv_router_with_max3421.md.
+#define MAX3421_SPI_CLOCK_HZ (5 * 1000 * 1000)
 
 static spi_device_handle_t s_spi_dev;
 static TaskHandle_t s_max3421_task;
@@ -179,16 +187,214 @@ static esp_err_t max3421_spi_bus_init(void)
     return spi_bus_add_device(MAX3421_SPI_HOST, &dev_conf, &s_spi_dev);
 }
 
-// ── TinyUSB Host HID callbacks (Phase 1: dump only, see usb_host_max3421.h) ──
+// ── Per-device state, purely for dispatch/parsing - see
+// mds/2026-08-21_host_report_protocol.md / mds/2026-08-22_9buttons_mouse.md
+// for what these fields are for. Keyed by (dev_addr, idx) instead of
+// hid_host_device_handle_t (usb_host_task.c's native OTG equivalent).
+// Deliberately NOT touching SET_PROTOCOL/protocol negotiation anywhere in
+// this file - see mds/2026-08-23_filter_conv_router_with_max3421.md:
+// this used to call tuh_hid_set_protocol() per device on top of the
+// automatic enum-time one (tuh_hid_set_default_protocol() below +
+// CFG_TUH_HID_SET_PROTOCOL_ON_ENUM, default on), and that extra explicit
+// call - even after fixing it to wait for its completion callback before
+// starting tuh_hid_receive_report() - kept reproducing occasional
+// wrong-length reports on this specific wireless dongle. Going back to
+// exactly what the earlier "dump everything" smoke test did (only the
+// automatic enum-time SET_PROTOCOL, driven by the global default below,
+// nothing per-device) is what's actually been confirmed reliable on real
+// hardware, so this only adds dispatch/parsing on top of that, without
+// touching protocol negotiation at all. ──
+
+#define MAX_MOUSE_DEVICES 4
+typedef struct {
+    uint8_t                  dev_addr;
+    uint8_t                  idx;
+    bool                     use_report_protocol;
+    mouse_report_layout_t    layout;
+    consumer_report_layout_t consumer_layout;
+} max3421_mouse_state_t;
+static max3421_mouse_state_t s_mouse_devices[MAX_MOUSE_DEVICES];
+static int s_mouse_device_count;
+
+#define MAX_CONSUMER_DEVICES 4
+typedef struct {
+    uint8_t                  dev_addr;
+    uint8_t                  idx;
+    consumer_report_layout_t layout;
+} max3421_consumer_state_t;
+static max3421_consumer_state_t s_consumer_devices[MAX_CONSUMER_DEVICES];
+static int s_consumer_device_count;
+
+static int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static max3421_mouse_state_t *find_mouse_device(uint8_t dev_addr, uint8_t idx)
+{
+    for (int i = 0; i < s_mouse_device_count; i++) {
+        if (s_mouse_devices[i].dev_addr == dev_addr && s_mouse_devices[i].idx == idx) {
+            return &s_mouse_devices[i];
+        }
+    }
+    return NULL;
+}
+
+static max3421_mouse_state_t *register_mouse_device(uint8_t dev_addr, uint8_t idx)
+{
+    if (s_mouse_device_count >= MAX_MOUSE_DEVICES) {
+        return NULL;
+    }
+    max3421_mouse_state_t *d = &s_mouse_devices[s_mouse_device_count++];
+    memset(d, 0, sizeof(*d));
+    d->dev_addr = dev_addr;
+    d->idx      = idx;
+    return d;
+}
+
+static void unregister_mouse_device(uint8_t dev_addr, uint8_t idx)
+{
+    for (int i = 0; i < s_mouse_device_count; i++) {
+        if (s_mouse_devices[i].dev_addr == dev_addr && s_mouse_devices[i].idx == idx) {
+            s_mouse_devices[i] = s_mouse_devices[--s_mouse_device_count];
+            return;
+        }
+    }
+}
+
+static max3421_consumer_state_t *find_consumer_device(uint8_t dev_addr, uint8_t idx)
+{
+    for (int i = 0; i < s_consumer_device_count; i++) {
+        if (s_consumer_devices[i].dev_addr == dev_addr && s_consumer_devices[i].idx == idx) {
+            return &s_consumer_devices[i];
+        }
+    }
+    return NULL;
+}
+
+static max3421_consumer_state_t *register_consumer_device(uint8_t dev_addr, uint8_t idx)
+{
+    if (s_consumer_device_count >= MAX_CONSUMER_DEVICES) {
+        return NULL;
+    }
+    max3421_consumer_state_t *d = &s_consumer_devices[s_consumer_device_count++];
+    memset(d, 0, sizeof(*d));
+    d->dev_addr = dev_addr;
+    d->idx      = idx;
+    return d;
+}
+
+static void unregister_consumer_device(uint8_t dev_addr, uint8_t idx)
+{
+    for (int i = 0; i < s_consumer_device_count; i++) {
+        if (s_consumer_devices[i].dev_addr == dev_addr && s_consumer_devices[i].idx == idx) {
+            s_consumer_devices[i] = s_consumer_devices[--s_consumer_device_count];
+            return;
+        }
+    }
+}
+
+static void handle_keyboard_report(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(hid_keyboard_report_t)) {
+        return;
+    }
+    const hid_keyboard_report_t *report = (const hid_keyboard_report_t *)data;
+    hid_forwarder_keyboard_report(report->modifier, report->keycode);
+}
+
+static void handle_mouse_report_boot(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(hid_mouse_report_t)) {
+        return;
+    }
+    const hid_mouse_report_t *report = (const hid_mouse_report_t *)data;
+    // Boot Protocol mice don't report wheel/pan/buttons 4+ - see
+    // mds/2026-08-21_host_report_protocol.md.
+    hid_forwarder_mouse_sample(report->buttons, report->x, report->y, 0, 0);
+}
+
+static void handle_mouse_report_generic(const mouse_report_layout_t *layout, const uint8_t *data, size_t length)
+{
+    uint8_t buttons = 0;
+    for (uint8_t i = 0; i < layout->button_count && i < HID_MAX_BUTTONS; i++) {
+        if (hid_extract_field(data, length, &layout->buttons[i]) != 0) {
+            buttons |= (uint8_t)(1u << i);
+        }
+    }
+
+    int16_t dx = (int16_t)clamp_i32(hid_extract_field(data, length, &layout->x), INT16_MIN, INT16_MAX);
+    int16_t dy = (int16_t)clamp_i32(hid_extract_field(data, length, &layout->y), INT16_MIN, INT16_MAX);
+    int8_t wheel = layout->wheel.present
+                       ? (int8_t)clamp_i32(hid_extract_field(data, length, &layout->wheel), INT8_MIN, INT8_MAX)
+                       : 0;
+    int8_t pan = layout->pan.present
+                     ? (int8_t)clamp_i32(hid_extract_field(data, length, &layout->pan), INT8_MIN, INT8_MAX)
+                     : 0;
+
+    hid_forwarder_mouse_sample(buttons, dx, dy, wheel, pan);
+}
+
+static void handle_consumer_report(const consumer_report_layout_t *layout, const uint8_t *data, size_t length)
+{
+    uint16_t usage_id = (uint16_t)hid_extract_field(data, length, &layout->selector);
+    hid_forwarder_consumer(usage_id);
+}
+
+// ── TinyUSB Host HID callbacks ──────────────────────────────────────────
+// mount/report_received still do exactly what the dump-only smoke test
+// did as far as TinyUSB API calls go (just tuh_hid_receive_report() at
+// the end, no protocol negotiation) - only the descriptor
+// parsing/dispatch bookkeeping is new.
 
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t *report_desc, uint16_t desc_len)
 {
     tuh_itf_info_t itf_info = {0};
     tuh_hid_itf_get_info(dev_addr, idx, &itf_info);
+    uint8_t proto = itf_info.desc.bInterfaceProtocol;
     ESP_LOGI(TAG, "HID mounted: dev_addr=%d idx=%d class=%d subclass=%d protocol=%d, report descriptor (%d bytes):",
              dev_addr, idx, itf_info.desc.bInterfaceClass, itf_info.desc.bInterfaceSubClass,
-             itf_info.desc.bInterfaceProtocol, (int)desc_len);
+             proto, (int)desc_len);
     ESP_LOG_BUFFER_HEX(TAG, report_desc, desc_len);
+
+    if (proto == HID_ITF_PROTOCOL_MOUSE) {
+        max3421_mouse_state_t *dev = register_mouse_device(dev_addr, idx);
+        if (dev && report_desc && desc_len > 0) {
+            hid_parse_mouse_report_descriptor(report_desc, desc_len, &dev->layout);
+            dev->use_report_protocol = dev->layout.x.present && dev->layout.y.present;
+
+            // Some mice bundle a Consumer Control selector (volume,
+            // forward/back, ...) into this same interface on a separate
+            // Report ID - see mds/2026-08-22_9buttons_mouse.md.
+            hid_parse_consumer_report_descriptor(report_desc, desc_len, &dev->consumer_layout);
+            if (dev->consumer_layout.selector.present) {
+                ESP_LOGI(TAG, "Mouse also has a bundled Consumer Control selector (report_id=%d bit_length=%d)",
+                         dev->consumer_layout.selector.report_id, dev->consumer_layout.selector.bit_length);
+            }
+            ESP_LOGI(TAG, "Mouse connected (use_report_protocol=%d buttons=%d wheel=%d pan=%d)",
+                     dev->use_report_protocol, dev->layout.button_count, dev->layout.wheel.present, dev->layout.pan.present);
+        }
+    } else if (proto == HID_ITF_PROTOCOL_NONE) {
+        // Might be a keyboard's Consumer Control ("media keys") interface,
+        // or a standalone Consumer Control device - see
+        // mds/2026-08-22_consumer_control.md.
+        consumer_report_layout_t layout = {0};
+        if (report_desc && desc_len > 0) {
+            hid_parse_consumer_report_descriptor(report_desc, desc_len, &layout);
+        }
+        if (layout.selector.present) {
+            max3421_consumer_state_t *dev = register_consumer_device(dev_addr, idx);
+            if (dev) {
+                dev->layout = layout;
+                ESP_LOGI(TAG, "Consumer Control device connected (media keys): bit_offset=%d bit_length=%d report_id=%d",
+                         layout.selector.bit_offset, layout.selector.bit_length, layout.selector.report_id);
+            }
+        }
+    }
+    // proto == HID_ITF_PROTOCOL_KEYBOARD needs no registration - decoded
+    // directly as a fixed-layout Boot report in tuh_hid_report_received_cb().
 
     if (!tuh_hid_receive_report(dev_addr, idx)) {
         ESP_LOGW(TAG, "tuh_hid_receive_report() failed right after mount (dev_addr=%d idx=%d)", dev_addr, idx);
@@ -198,12 +404,43 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t *report_desc,
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t idx)
 {
     ESP_LOGI(TAG, "HID unmounted: dev_addr=%d idx=%d", dev_addr, idx);
+    unregister_mouse_device(dev_addr, idx);
+    unregister_consumer_device(dev_addr, idx);
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t idx, const uint8_t *report, uint16_t len)
 {
+    // Debug aid - see usb_host_task.c's equivalent toggles. Temporarily
+    // ON while diagnosing report-length issues - comment back out once
+    // confirmed stable.
+    //*
     ESP_LOGI(TAG, "[%d:%d] raw report (%d bytes):", dev_addr, idx, (int)len);
     ESP_LOG_BUFFER_HEX(TAG, report, len);
+    //*/
+
+    tuh_itf_info_t itf_info = {0};
+    tuh_hid_itf_get_info(dev_addr, idx, &itf_info);
+    uint8_t proto = itf_info.desc.bInterfaceProtocol;
+
+    if (proto == HID_ITF_PROTOCOL_KEYBOARD) {
+        handle_keyboard_report(report, len);
+    } else if (proto == HID_ITF_PROTOCOL_MOUSE) {
+        max3421_mouse_state_t *dev = find_mouse_device(dev_addr, idx);
+        if (dev && dev->consumer_layout.selector.present &&
+            dev->consumer_layout.selector.report_id != 0 &&
+            len >= 1 && report[0] == dev->consumer_layout.selector.report_id) {
+            handle_consumer_report(&dev->consumer_layout, report, len);
+        } else if (dev && dev->use_report_protocol) {
+            handle_mouse_report_generic(&dev->layout, report, len);
+        } else if (dev) {
+            handle_mouse_report_boot(report, len);
+        }
+    } else {
+        max3421_consumer_state_t *dev = find_consumer_device(dev_addr, idx);
+        if (dev) {
+            handle_consumer_report(&dev->layout, report, len);
+        }
+    }
 
     // Keep the report stream going - tuh_hid does not auto-repeat this
     // like the native usb_host_hid driver does.
@@ -245,7 +482,10 @@ static void max3421_host_task(void *arg)
     // same as the RP2040 cross-test needed to override - see
     // mds/2026-08-22_rp2040_host_check.md. Without this, mice come back as
     // plain 3-byte buttons/dx/dy, not the Report ID-tagged Report Protocol
-    // data (wheel, extra buttons) this project actually wants.
+    // data (wheel, extra buttons) this project actually wants. This is the
+    // ONLY protocol negotiation this file does - see the block comment
+    // above the device-state tables for why nothing per-device is added
+    // on top of it.
     tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT);
 
     const tusb_rhport_init_t rh_init = {

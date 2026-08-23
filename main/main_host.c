@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
+#include "hid_forwarder.h"
 #include "protocol.h"
 #include "status_led.h"
 #include "usb_host_max3421.h"
@@ -48,16 +49,23 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_LOGI(TAG, "WiFi power save disabled");
 
+    if (hid_forwarder_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init HID forwarder (UDP socket). Restarting in 5s...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_restart();
+    }
+
     if (usb_host_task_start() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start USB host task. Restarting in 5s...");
         vTaskDelay(pdMS_TO_TICKS(5000));
         esp_restart();
     }
 
-    // Phase 1 smoke test (mds/2026-08-23_filter_conv_router_with_max3421.md):
+    // MAX3421E/TinyUSB USB Host path (mds/2026-08-23_filter_conv_router_with_max3421.md):
     // runs unconditionally alongside the native OTG Host path above, not
-    // yet auto-detected/fallback-gated. Not fatal if it fails/no MAX3421E
-    // is wired - see usb_host_max3421.h.
+    // yet auto-detected/fallback-gated - both funnel into the same
+    // hid_forwarder.c pipeline. Not fatal if it fails/no MAX3421E is
+    // wired - see usb_host_max3421.h.
     if (usb_host_max3421_task_start() != ESP_OK) {
         ESP_LOGW(TAG, "MAX3421 USB host task failed to start (not fatal - continuing with native OTG Host only)");
     }

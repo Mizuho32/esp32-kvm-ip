@@ -33,6 +33,17 @@
 #define CFG_TUH_HID_EPIN_BUFSIZE   64
 #define CFG_TUH_HID_EPOUT_BUFSIZE  64
 
+// CFG_TUH_HID_SET_PROTOCOL_ON_ENUM left at its default (1, hid_host.h) -
+// this is the ONLY protocol negotiation usb_host_max3421.c relies on
+// (via tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT) there). Adding
+// a second, per-device SET_PROTOCOL call on top of this (even carefully
+// sequenced after this one's completion callback) reproducibly caused
+// the wireless mouse dongle to occasionally serve a wrong-length
+// (Boot-shaped) report - see
+// mds/2026-08-23_filter_conv_router_with_max3421.md. Whatever the exact
+// mechanism, empirically: touch this dongle's protocol negotiation only
+// once, not twice.
+
 // Not used by this project's Host role.
 #define CFG_TUH_CDC             0
 #define CFG_TUH_MSC             0
