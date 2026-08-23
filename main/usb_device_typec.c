@@ -89,6 +89,16 @@ bool usb_device_typec_connected(void)
 static volatile uint32_t s_wait_calls;
 static volatile uint32_t s_wait_blocked_calls;
 static volatile uint32_t s_wait_blocked_ticks;
+// tud_hid_n_report() itself returning false right after wait_for_ready()
+// returned true - i.e. the actual USB submission silently failing
+// despite the readiness check passing. Previously invisible:
+// USB_DEVICE_TYPEC_DEBUG's sent=/dropped= logging is off by default, so
+// nothing was counting this. A report that fails here is dropped with
+// no retry (same as a failed wait_for_ready()) - if this fires anywhere
+// near as often as reports are attempted, it alone would explain
+// on-screen cursor updates landing far below the ~100Hz confirmed
+// reaching this file.
+static volatile uint32_t s_submit_fail_calls;
 
 static void maybe_print_wait_stats(void)
 {
@@ -101,11 +111,21 @@ static void maybe_print_wait_stats(void)
     uint32_t calls   = s_wait_calls;
     uint32_t blocked = s_wait_blocked_calls;
     uint32_t ticks   = s_wait_blocked_ticks;
+    uint32_t fails   = s_submit_fail_calls;
     s_wait_calls = 0;
     s_wait_blocked_calls = 0;
     s_wait_blocked_ticks = 0;
-    ESP_LOGI(TAG, "[rate] wait_for_ready: %u calls/sec, %u blocked/sec, %u ms blocked/sec",
-             (unsigned)calls, (unsigned)blocked, (unsigned)(ticks * portTICK_PERIOD_MS));
+    s_submit_fail_calls = 0;
+    ESP_LOGI(TAG, "[rate] wait_for_ready: %u calls/sec, %u blocked/sec, %u ms blocked/sec, %u submit failures/sec",
+             (unsigned)calls, (unsigned)blocked, (unsigned)(ticks * portTICK_PERIOD_MS), (unsigned)fails);
+}
+
+static void note_submit_result(bool sent)
+{
+    if (!sent) {
+        s_submit_fail_calls++;
+    }
+    maybe_print_wait_stats();
 }
 #endif
 
@@ -132,7 +152,9 @@ static bool wait_for_ready(uint8_t itf_num)
                 s_wait_blocked_calls++;
                 s_wait_blocked_ticks += elapsed;
             }
-            maybe_print_wait_stats();
+            // Printing (if due) happens in note_submit_result() below,
+            // once the actual tud_hid_n_report() outcome is also known -
+            // not here.
 #endif
             return true;
         }
@@ -155,6 +177,9 @@ void usb_device_typec_keyboard_report(uint8_t modifiers, const uint8_t keycodes[
     };
     memcpy(report.keycode, keycodes, 6);
     bool sent = tud_hid_n_report(ITF_NUM_KEYBOARD, 0, &report, sizeof(report));
+#if USB_DEVICE_TYPEC_RATE_MONITOR
+    note_submit_result(sent);
+#endif
 #if USB_DEVICE_TYPEC_DEBUG
     ESP_LOGI(TAG, "keyboard report sent=%d modifiers=0x%02x", sent, modifiers);
 #else
@@ -190,6 +215,9 @@ void usb_device_typec_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8
         };
         sent = tud_hid_n_report(ITF_NUM_MOUSE, 0, &report, sizeof(report));
     }
+#if USB_DEVICE_TYPEC_RATE_MONITOR
+    note_submit_result(sent);
+#endif
 #if USB_DEVICE_TYPEC_DEBUG
     ESP_LOGI(TAG, "mouse report sent=%d buttons=0x%02x dx=%d dy=%d", sent, buttons, dx, dy);
 #else
@@ -206,6 +234,9 @@ void usb_device_typec_consumer_report(uint16_t usage_id)
         .usage_id = usage_id,
     };
     bool sent = tud_hid_n_report(ITF_NUM_CONSUMER, 0, &report, sizeof(report));
+#if USB_DEVICE_TYPEC_RATE_MONITOR
+    note_submit_result(sent);
+#endif
 #if USB_DEVICE_TYPEC_DEBUG
     ESP_LOGI(TAG, "consumer report sent=%d usage_id=0x%04x", sent, usage_id);
 #else
