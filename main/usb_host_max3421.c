@@ -11,16 +11,17 @@
 
 #define TAG "USBHOST_MAX3421"
 
-// Placeholder wiring - ADJUST to match the actual MAX3421E breakout
-// wiring (mds/2026-08-23_filter_conv_router_with_max3421.md). These are
-// plain GPIOs, independent of the native OTG Host path's fixed
-// USB_DP/USB_DM silicon pins (usb_host_task.c), so there's no conflict
-// with that path regardless of which free GPIOs end up used here.
-#define MAX3421_PIN_MOSI  11
-#define MAX3421_PIN_MISO  13
-#define MAX3421_PIN_SCLK  12
-#define MAX3421_PIN_CS    10
-#define MAX3421_PIN_INT   9
+// Actual wiring (mds/2026-08-23_filter_conv_router_with_max3421.md) -
+// MOSI/MISO/SCLK are the ESP32-S3-Plus board's standard SPI pins. These
+// are plain GPIOs, independent of the native OTG Host path's fixed
+// USB_DP/USB_DM silicon pins (usb_host_task.c) and of the UART0 console
+// (GPIO43/44), so there's no conflict with either.
+#define MAX3421_PIN_MOSI  9
+#define MAX3421_PIN_MISO  8
+#define MAX3421_PIN_SCLK  7
+#define MAX3421_PIN_CS    4
+#define MAX3421_PIN_RST   5
+#define MAX3421_PIN_INT   6
 
 // Logical TinyUSB root-hub port number for the MAX3421E - see
 // CFG_TUSB_RHPORT0_MODE in components/tinyusb/host_config/tusb_config.h
@@ -120,6 +121,22 @@ static esp_err_t max3421_spi_gpio_init(void)
         return err;
     }
     gpio_set_level(MAX3421_PIN_CS, 1); // deasserted (active-low)
+
+    // RESET is active-low - hold it low briefly, then release, before any
+    // SPI traffic (MAX3421E datasheet: registers aren't valid until after
+    // reset is released and the oscillator has stabilized).
+    gpio_config_t rst_conf = {
+        .pin_bit_mask = 1ULL << MAX3421_PIN_RST,
+        .mode         = GPIO_MODE_OUTPUT,
+    };
+    err = gpio_config(&rst_conf);
+    if (err != ESP_OK) {
+        return err;
+    }
+    gpio_set_level(MAX3421_PIN_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(MAX3421_PIN_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(10)); // oscillator settling time
 
     gpio_config_t int_conf = {
         .pin_bit_mask = 1ULL << MAX3421_PIN_INT,
