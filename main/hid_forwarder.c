@@ -176,15 +176,27 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
     uint8_t synth_modifiers = 0;
     uint8_t synth_keycode = HID_KEY_NO_PRESS;
 
-    if (filter_mouse_report(&buttons, &dx, &dy, &wheel, &pan, &synth_modifiers, &synth_keycode)) {
-        if (usb_device_typec_connected()) {
-            usb_device_typec_mouse_report(buttons, dx, dy, wheel, pan);
-            if (route_mouse_also_udp(buttons, dx, dy, wheel, pan)) {
-                send_mouse_report_raw(buttons, dx, dy, wheel, pan);
-            }
-        } else {
+    // Split (rough, to be revisited): filter_rules.h now only shapes the
+    // type-c-bound copy; route_rules.h/UDP always see the original raw
+    // values, never the filtered ones. This lets e.g. wheel be dropped
+    // from type-c via filter_rules.h while still reaching the Device-role
+    // board over UDP via route_rules.h - see README.md's filter/conv/route
+    // section.
+    uint8_t f_buttons = buttons;
+    int16_t f_dx = dx, f_dy = dy;
+    int8_t f_wheel = wheel, f_pan = pan;
+    bool forward_typec = filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
+                                             &synth_modifiers, &synth_keycode);
+
+    if (usb_device_typec_connected()) {
+        if (forward_typec) {
+            usb_device_typec_mouse_report(f_buttons, f_dx, f_dy, f_wheel, f_pan);
+        }
+        if (route_mouse_also_udp(buttons, dx, dy, wheel, pan)) {
             send_mouse_report_raw(buttons, dx, dy, wheel, pan);
         }
+    } else {
+        send_mouse_report_raw(buttons, dx, dy, wheel, pan);
     }
     apply_mouse_synth_keys(synth_modifiers, synth_keycode);
 }

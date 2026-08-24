@@ -15,10 +15,16 @@
 // Only consulted while the native USB-OTG port is actually connected to
 // a PC as a USB Device (tud_mounted() - see usb_device_typec.h); if it
 // isn't, everything goes over UDP regardless of these, same as always.
-// While connected, every (already filter_rules.h-filtered) report
-// always goes to type-c; these decide whether it *also* gets mirrored
-// over UDP to the existing Device-role board. Below: nothing is mirrored
-// by default - edit freely, this is your copy.
+// While connected, these decide whether a report *also* gets mirrored
+// over UDP to the existing Device-role board, on top of the type-c
+// output every report always gets. Below: nothing is mirrored by
+// default - edit freely, this is your copy.
+//
+// route_mouse_also_udp() sees the *raw* (pre-filter_rules.h) values -
+// filter_rules.h only shapes the type-c-bound copy (rough split, see
+// hid_forwarder.c's hid_forwarder_mouse_sample()), so a field dropped
+// from type-c there can still be mirrored to UDP here. Keyboard/consumer
+// routing below still sees the already-filtered report.
 
 /**
  * @return true to also send this keyboard report over UDP while type-c

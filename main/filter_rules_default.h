@@ -10,11 +10,17 @@
 // is tracked in git and is what a fresh checkout builds with.
 //
 // To customize: copy filter_rules.h.example to filter_rules.h (gitignored,
-// like wifi_credentials.h) and edit it. usb_host_task.c picks whichever
+// like wifi_credentials.h) and edit it. hid_forwarder.c picks whichever
 // one exists (filter_rules.h if present, this file otherwise) - see the
-// __has_include check in usb_host_task.c. See mds/2026-08-21_filter_conv_route.md
+// __has_include check there. See mds/2026-08-21_filter_conv_route.md
 // and mds/2026-08-21_host_report_protocol.md for the design rationale and
 // what each parameter means.
+//
+// filter_mouse_report()'s edits only shape the type-c-bound copy (rough
+// split, see hid_forwarder.c's hid_forwarder_mouse_sample()) - UDP always
+// gets the original raw values regardless of what this does; see
+// route_rules.h to also mirror a report to UDP. filter_keyboard_report()
+// is unchanged: it still shapes both outputs.
 
 static inline bool filter_keyboard_report(uint8_t *modifiers, uint8_t keycodes[6])
 {

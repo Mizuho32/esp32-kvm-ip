@@ -27,6 +27,13 @@
 // otherwise - see usb_host_task.c's handle_driver_connected(). Below:
 // the back/forward -> Alt+arrow rule is enabled; wheel-drop is written
 // but commented out (uncomment to enable) - edit freely, this is your copy.
+//
+// filter_mouse_report()'s edits only shape the type-c-bound copy (rough
+// split, see hid_forwarder.c's hid_forwarder_mouse_sample()) - UDP always
+// gets the original raw values regardless of what this does; see
+// route_rules.h to also mirror a report to UDP (e.g. to still send a
+// field dropped here, like wheel below, over UDP). filter_keyboard_report()
+// is unchanged: it still shapes both outputs.
 
 /**
  * Called for every keyboard Boot Protocol report.
@@ -92,7 +99,9 @@ static inline bool filter_mouse_report(uint8_t *buttons, int16_t *dx, int16_t *d
                                        int8_t *wheel, int8_t *pan,
                                        uint8_t *synth_modifiers, uint8_t *synth_keycode)
 {
-    // Drop the wheel entirely.
+    // Drop the wheel entirely (from the type-c path only - pair with a
+    // route_mouse_also_udp() in route_rules.h that returns true for
+    // wheel/pan != 0 if you still want it reaching UDP).
     // *wheel = 0;
 
     // Back (button 4, bit 3) -> Alt+Left, Forward (button 5, bit 4) ->

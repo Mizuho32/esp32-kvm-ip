@@ -19,12 +19,18 @@
 // mds/2026-08-23_filter_conv_router_with_max3421.md's Phase2 section for
 // the design rationale.
 //
-// These run *after* filter_rules.h and only while type-c is actually
-// connected (tud_mounted()) - if it isn't, hid_forwarder.c sends
-// everything over UDP regardless of these, same as before Phase2. Return
-// true to *also* mirror this (already-filtered) report over UDP to the
-// existing Device-role board, on top of the type-c output every report
-// always gets while connected.
+// These only run while type-c is actually connected (tud_mounted()) - if
+// it isn't, hid_forwarder.c sends everything over UDP regardless of
+// these, same as before Phase2. Return true to *also* mirror this report
+// over UDP to the existing Device-role board, on top of the type-c
+// output every report always gets while connected.
+//
+// route_mouse_also_udp() sees the *raw* (pre-filter_rules.h) values, not
+// what type-c received - filter_rules.h now only shapes the type-c-bound
+// copy (rough split, hid_forwarder.c's hid_forwarder_mouse_sample()) so
+// e.g. a field dropped from type-c can still reach UDP here.
+// route_keyboard_also_udp()/route_consumer_also_udp() are unchanged: they
+// still see the already-filtered report.
 
 static inline bool route_keyboard_also_udp(uint8_t modifiers, const uint8_t keycodes[6])
 {
