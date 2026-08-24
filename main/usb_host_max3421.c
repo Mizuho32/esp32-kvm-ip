@@ -16,7 +16,7 @@
 
 #define TAG "USBHOST_MAX3421"
 
-// Actual wiring (mds/2026-08-23_filter_conv_router_with_max3421.md) -
+// Actual wiring (mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md) -
 // MOSI/MISO/SCLK are the ESP32-S3-Plus board's standard SPI pins. These
 // are plain GPIOs, independent of the native OTG Host path's fixed
 // USB_DP/USB_DM silicon pins (usb_host_task.c) and of the UART0 console
@@ -42,7 +42,7 @@
 // breadboard jumper wires - 10MHz was unreliable (devices mounting then
 // unmounting almost immediately). Empirically, 5MHz turned out more
 // stable than 1MHz on this wiring (not obviously lower is better) - see
-// mds/2026-08-23_filter_conv_router_with_max3421.md.
+// mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md.
 #define MAX3421_SPI_CLOCK_HZ (5 * 1000 * 1000)
 
 static spi_device_handle_t s_spi_dev;
@@ -237,7 +237,7 @@ bool usb_host_max3421_probe(void)
     // makes). Not bulletproof against a floating/garbage bus coincidentally
     // matching one of these bytes, but no worse than what the driver
     // already relies on internally - see
-    // mds/2026-08-23_filter_conv_router_with_max3421.md for the earlier
+    // mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md for the earlier
     // "looked alive even seemingly unpowered" report on this wiring.
     uint8_t revision = rx_buf[1];
     bool present = xfer_ok && (revision == 0x01 || revision == 0x12 || revision == 0x13);
@@ -247,11 +247,11 @@ bool usb_host_max3421_probe(void)
 }
 
 // ── Per-device state, purely for dispatch/parsing - see
-// mds/2026-08-21_host_report_protocol.md / mds/2026-08-22_9buttons_mouse.md
+// mds/usb_hid/2026-08-21_host_report_protocol.md / mds/usb_hid/2026-08-22_9buttons_mouse.md
 // for what these fields are for. Keyed by (dev_addr, idx) instead of
 // hid_host_device_handle_t (usb_host_task.c's native OTG equivalent).
 // Deliberately NOT touching SET_PROTOCOL/protocol negotiation anywhere in
-// this file - see mds/2026-08-23_filter_conv_router_with_max3421.md:
+// this file - see mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md:
 // this used to call tuh_hid_set_protocol() per device on top of the
 // automatic enum-time one (tuh_hid_set_default_protocol() below +
 // CFG_TUH_HID_SET_PROTOCOL_ON_ENUM, default on), and that extra explicit
@@ -371,7 +371,7 @@ static void handle_mouse_report_boot(const uint8_t *data, size_t length)
     }
     const hid_mouse_report_t *report = (const hid_mouse_report_t *)data;
     // Boot Protocol mice don't report wheel/pan/buttons 4+ - see
-    // mds/2026-08-21_host_report_protocol.md.
+    // mds/usb_hid/2026-08-21_host_report_protocol.md.
     hid_forwarder_mouse_sample(report->buttons, report->x, report->y, 0, 0);
 }
 
@@ -426,7 +426,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t *report_desc,
 
             // Some mice bundle a Consumer Control selector (volume,
             // forward/back, ...) into this same interface on a separate
-            // Report ID - see mds/2026-08-22_9buttons_mouse.md.
+            // Report ID - see mds/usb_hid/2026-08-22_9buttons_mouse.md.
             hid_parse_consumer_report_descriptor(report_desc, desc_len, &dev->consumer_layout);
             if (dev->consumer_layout.selector.present) {
                 ESP_LOGI(TAG, "Mouse also has a bundled Consumer Control selector (report_id=%d bit_length=%d)",
@@ -438,7 +438,7 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t idx, const uint8_t *report_desc,
     } else if (proto == HID_ITF_PROTOCOL_NONE) {
         // Might be a keyboard's Consumer Control ("media keys") interface,
         // or a standalone Consumer Control device - see
-        // mds/2026-08-22_consumer_control.md.
+        // mds/usb_hid/2026-08-22_consumer_control.md.
         consumer_report_layout_t layout = {0};
         if (report_desc && desc_len > 0) {
             hid_parse_consumer_report_descriptor(report_desc, desc_len, &layout);
@@ -535,7 +535,7 @@ static void max3421_host_task(void *arg)
 
     // TinyUSB defaults to Boot Protocol (hid_host.c's _hidh_default_protocol),
     // same as the RP2040 cross-test needed to override - see
-    // mds/2026-08-22_rp2040_host_check.md. Without this, mice come back as
+    // mds/usb_hid/2026-08-22_rp2040_host_check.md. Without this, mice come back as
     // plain 3-byte buttons/dx/dy, not the Report ID-tagged Report Protocol
     // data (wheel, extra buttons) this project actually wants. This is the
     // ONLY protocol negotiation this file does - see the block comment

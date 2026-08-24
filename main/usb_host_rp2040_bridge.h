@@ -8,7 +8,7 @@
 /**
  * Host role only (KVM_ROLE=HOST). Alternative USB Host backend to
  * usb_host_max3421.c - see
- * mds/2026-08-23_rp2040_as_host_bridge_plan.md. Instead of an SPI-
+ * mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md. Instead of an SPI-
  * attached MAX3421E SIE + TinyUSB Host running on this chip, an external
  * RP2040 does the actual USB Host role itself (its own native USB
  * peripheral + TinyUSB Host, already proven on real hardware via
@@ -21,7 +21,7 @@
  * multi-byte transactions held across a single CS assertion, which
  * turned out to be sensitive to breadboard wiring quality (mount/unmount
  * instability, occasional 0-byte reports, never fully resolved - see
- * mds/2026-08-23_filter_conv_router_with_max3421.md). A UART link is
+ * mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md). A UART link is
  * just a byte stream (self-clocked per byte, no shared multi-byte
  * transaction timing), so it's expected to tolerate wiring quality much
  * better - and since the RP2040 does its own HID report descriptor

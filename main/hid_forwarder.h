@@ -8,7 +8,7 @@
  * Host role only (KVM_ROLE=HOST). Shared forwarding pipeline used by
  * both USB Host backends (native OTG - usb_host_task.c - and MAX3421E/
  * TinyUSB - usb_host_max3421.c, see
- * mds/2026-08-23_filter_conv_router_with_max3421.md). Owns the UDP
+ * mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md). Owns the UDP
  * socket, filter_rules.h application, the merged-keyboard-state logic (a
  * physical keyboard's own keys and mouse-triggered synthetic keys - e.g.
  * back/forward -> Alt+arrow - have to be combined into one report, since
@@ -42,7 +42,7 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
 /** A Consumer Control ("media keys", or a mouse's bundled
  * volume/forward/back selector) usage ID, forwarded as-is on every call
  * (0 = release) - not run through filter_rules.h (yet), matching how
- * this has worked so far (mds/2026-08-22_consumer_control.md). */
+ * this has worked so far (mds/usb_hid/2026-08-22_consumer_control.md). */
 void hid_forwarder_consumer(uint16_t usage_id);
 
 #endif

@@ -16,7 +16,7 @@
 // like filter_rules.h) and edit it. hid_forwarder.c picks whichever one
 // exists (route_rules.h if present, this file otherwise) - see the
 // __has_include check there. See
-// mds/2026-08-23_filter_conv_router_with_max3421.md's Phase2 section for
+// mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md's Phase2 section for
 // the design rationale.
 //
 // These only run while type-c is actually connected (tud_mounted()) - if

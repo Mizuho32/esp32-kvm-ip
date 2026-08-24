@@ -18,7 +18,7 @@ set(includes_public
 # KVM_ROLE=HOST (see ../../main/CMakeLists.txt) needs TinyUSB's Host mode
 # + MAX3421E HCD driver (main/usb_host_max3421.c) instead of TinyUSB's
 # device-mode sources - see
-# mds/2026-08-23_filter_conv_router_with_max3421.md. This is why this
+# mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md. This is why this
 # component is a locally-owned override (main/idf_component.yml's
 # override_path) of the espressif/tinyusb registry package instead of the
 # fetched copy: the packaged CMakeLists.txt only ever lists device-mode

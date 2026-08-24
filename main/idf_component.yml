@@ -7,7 +7,7 @@ dependencies:
     # package only builds TinyUSB's device-mode sources, but KVM_ROLE=HOST
     # additionally needs TinyUSB's Host mode + MAX3421E HCD driver - see
     # components/tinyusb/CMakeLists.txt and
-    # mds/2026-08-23_filter_conv_router_with_max3421.md.
+    # mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md.
     override_path: '../components/tinyusb'
   # Host role only (KVM_ROLE=HOST) - USB Host HID class driver.
   # Manifest deps are always compiled in regardless of KVM_ROLE (the

@@ -27,15 +27,15 @@
 static QueueHandle_t s_driver_event_queue;
 
 // Per-device Report Protocol layout, for mice whose HID Report
-// Descriptor parsed cleanly (see mds/2026-08-21_host_report_protocol.md).
+// Descriptor parsed cleanly (see mds/usb_hid/2026-08-21_host_report_protocol.md).
 // Devices that don't parse (or aren't Boot Interface subclass, so no
 // fallback exists) are simply not tracked here and their reports ignored.
 // Some mice bundle a Consumer Control ("volume", "forward/back", etc.)
 // selector into the very same interface as the mouse report, using a
-// different Report ID (see mds/2026-08-22_9buttons_mouse.md) - the same
+// different Report ID (see mds/usb_hid/2026-08-22_9buttons_mouse.md) - the same
 // "multiple collections, one interface, distinguished by Report ID"
 // pattern the Consumer Control keyboard case already handles
-// (mds/2026-08-22_consumer_control.md), just on a mouse-classified
+// (mds/usb_hid/2026-08-22_consumer_control.md), just on a mouse-classified
 // interface instead of a proto-0 one. consumer_layout.selector.present
 // is false when nothing like that was found.
 #define MAX_MOUSE_DEVICES 4
@@ -45,7 +45,7 @@ typedef struct {
     mouse_report_layout_t    layout;
     consumer_report_layout_t consumer_layout;
     // Last Consumer usage_id sent for the Report-ID-stripped 3-byte
-    // dongle quirk (see mds/2026-08-22_wireless_dongle_short_reports.md).
+    // dongle quirk (see mds/usb_hid/2026-08-22_wireless_dongle_short_reports.md).
     // Used to edge-trigger the release(0) send instead of requiring an
     // exact all-zero 3-byte report, which residual dx/dy jitter can
     // defeat.
@@ -86,7 +86,7 @@ static void unregister_mouse_device(hid_host_device_handle_t handle)
 }
 
 // Per-device Consumer Control ("media keys") layout - see
-// mds/2026-08-22_consumer_control.md. Devices whose Report Descriptor
+// mds/usb_hid/2026-08-22_consumer_control.md. Devices whose Report Descriptor
 // doesn't yield a recognizable selector field are closed again right
 // away in handle_driver_connected() and never reach this table.
 #define MAX_CONSUMER_DEVICES 4
@@ -151,7 +151,7 @@ static void handle_mouse_report_boot(const uint8_t *data, size_t length)
     }
     const hid_mouse_input_report_boot_t *report = (const hid_mouse_input_report_boot_t *)data;
     // Boot Protocol mice don't report wheel/pan/buttons 4+ - see
-    // mds/2026-08-21_host_report_protocol.md.
+    // mds/usb_hid/2026-08-21_host_report_protocol.md.
     hid_forwarder_mouse_sample(report->buttons.val, report->x_displacement, report->y_displacement, 0, 0);
 }
 
@@ -184,17 +184,17 @@ static void handle_mouse_report_generic(const mouse_report_layout_t *layout, con
 }
 
 // Forwards a Consumer Control ("media keys", or a mouse's bundled
-// volume/forward/back selector - see mds/2026-08-22_9buttons_mouse.md)
+// volume/forward/back selector - see mds/usb_hid/2026-08-22_9buttons_mouse.md)
 // usage ID as-is, on every report - no dedup, matching how the
 // keyboard/mouse paths already just forward whatever the physical
 // device sends. Not run through filter_rules.h (yet) - nothing has
 // needed to remap/drop one so far, see
-// mds/2026-08-22_consumer_control.md.
+// mds/usb_hid/2026-08-22_consumer_control.md.
 static void handle_consumer_report(const consumer_report_layout_t *layout, const uint8_t *data, size_t length)
 {
     uint16_t usage_id = (uint16_t)hid_extract_field(data, length, &layout->selector);
     // Debug aid - CONFIG_LOG_MAXIMUM_LEVEL is INFO in this project (see
-    // mds/2026-08-22_9buttons_mouse.md), so ESP_LOGD would be compiled out
+    // mds/usb_hid/2026-08-22_9buttons_mouse.md), so ESP_LOGD would be compiled out
     // entirely rather than just filtered at runtime; comment this out
     // instead of leaving it live, to avoid spamming every report. Keep
     // hid_forwarder_consumer() itself outside the toggle either way.
@@ -232,18 +232,18 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
                 // handle_consumer_report(); comment this out when not
                 // needed. Every raw report this interface produces,
                 // before any Report-ID-based dispatch - see
-                // mds/2026-08-22_9buttons_mouse.md.
+                // mds/usb_hid/2026-08-22_9buttons_mouse.md.
                 /*
                 ESP_LOGI(TAG, "Mouse raw report (%d bytes):", (int)data_length);
                 ESP_LOG_BUFFER_HEX(TAG, data, data_length);
                 */
                 // A bundled Consumer Control selector (volume/forward/back
-                // etc. on some mice - mds/2026-08-22_9buttons_mouse.md)
+                // etc. on some mice - mds/usb_hid/2026-08-22_9buttons_mouse.md)
                 // lives on its own Report ID within this same interface,
                 // so it has to be told apart by the report's own leading
                 // Report ID byte, not by the interface's overall proto.
                 // Some wireless receiver dongles (see
-                // mds/2026-08-22_9buttons_mouse.md) claim Report Protocol
+                // mds/usb_hid/2026-08-22_9buttons_mouse.md) claim Report Protocol
                 // via GET_PROTOCOL but keep sending Boot-Protocol-shaped
                 // 3-byte reports regardless (buttons + dx(int8) + dy(int8),
                 // no Report ID byte at all) - even for what the descriptor
@@ -281,7 +281,7 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
                     // on exact-zero missed releases whenever residual
                     // dx/dy jitter (e.g. hand tremor) landed in the same
                     // packet as the release, leaving the key stuck held
-                    // (see mds/2026-08-22_wireless_dongle_short_reports.md).
+                    // (see mds/usb_hid/2026-08-22_wireless_dongle_short_reports.md).
                     if (dev->consumer_layout.selector.present &&
                         dev->last_boot_consumer_usage != 0) {
                         hid_forwarder_consumer(0);
@@ -303,7 +303,7 @@ static void hid_host_interface_callback(hid_host_device_handle_t hid_device_hand
                 }
             }
             // Non-boot-interface keyboards and unparseable non-boot-interface
-            // mice are ignored - see mds/2026-08-21_host_report_protocol.md.
+            // mice are ignored - see mds/usb_hid/2026-08-21_host_report_protocol.md.
             break;
         }
         case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
@@ -335,7 +335,7 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
     // apart from some other vendor/system-control interface a keyboard
     // exposes, only its Report Descriptor can, and fetching that requires
     // the interface to already be open (HID_INTERFACE_STATE_READY or
-    // ACTIVE - see mds/2026-08-22_consumer_control.md), so unlike the
+    // ACTIVE - see mds/usb_hid/2026-08-22_consumer_control.md), so unlike the
     // fully-unsupported case below this candidate does cost a transient
     // host channel even when it turns out not to be one.
     bool maybe_consumer = (!is_mouse && !is_keyboard && dev_params.proto == HID_PROTOCOL_NONE);
@@ -343,7 +343,7 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
     if (!is_mouse && !is_keyboard && !maybe_consumer) {
         // Don't even open the interface, let alone start it - it claims
         // one of the ESP32-S3's 8 hardware host channels
-        // (OTG_NUM_HOST_CHAN, see mds/2026-08-22_multi_device.md), and an
+        // (OTG_NUM_HOST_CHAN, see mds/usb_hid/2026-08-22_multi_device.md), and an
         // interface we're just going to ignore isn't worth spending one
         // on - those are scarce once a hub + a few devices are attached.
         ESP_LOGI(TAG, "HID device connected (unsupported, proto %d) - ignoring, not opened", dev_params.proto);
@@ -380,7 +380,7 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
 
             // Some mice bundle a Consumer Control selector (volume,
             // forward/back, ...) into this same interface on a separate
-            // Report ID - see mds/2026-08-22_9buttons_mouse.md. Parsing
+            // Report ID - see mds/usb_hid/2026-08-22_9buttons_mouse.md. Parsing
             // this doesn't depend on parsed_ok - the two collections are
             // independent parts of the same descriptor.
             hid_parse_consumer_report_descriptor(desc, desc_len, &dev->consumer_layout);
@@ -394,7 +394,7 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
             // Debug aid - see comment on the ESP_LOGI above in
             // handle_consumer_report(); comment this out when not
             // needed. Neither call's result was ever checked before -
-            // see mds/2026-08-22_9buttons_mouse.md for why that matters
+            // see mds/usb_hid/2026-08-22_9buttons_mouse.md for why that matters
             // (a device that silently ignores/rejects this request would
             // just keep sending whatever it was already sending).
             /*
@@ -413,7 +413,7 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
             // So SET_PROTOCOL negotiation isn't the mechanism behind the
             // truncation; keeping this call since removing it had no
             // upside and could regress some other mouse that actually
-            // needs it. See mds/2026-08-22_wireless_dongle_short_reports.md.
+            // needs it. See mds/usb_hid/2026-08-22_wireless_dongle_short_reports.md.
             hid_class_request_set_idle(hid_device_handle, 0, 0);
             dev->use_report_protocol = true;
             ESP_LOGI(TAG, "Mouse connected: Report Protocol (buttons=%d wheel=%d pan=%d)",
@@ -441,7 +441,7 @@ static void handle_driver_connected(hid_host_device_handle_t hid_device_handle)
         // Boot Interface keyboard's own descriptor is normally irrelevant
         // (Boot Protocol's layout is fixed), but a device presenting
         // itself as this same interface may still bundle extra Report
-        // IDs alongside it - see mds/2026-08-22_9buttons_mouse.md, where
+        // IDs alongside it - see mds/usb_hid/2026-08-22_9buttons_mouse.md, where
         // exactly that happened on the mouse-classified interface.
         /*
         {

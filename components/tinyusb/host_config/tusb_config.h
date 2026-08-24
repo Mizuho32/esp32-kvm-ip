@@ -2,7 +2,7 @@
 #define TUSB_CONFIG_H
 
 // KVM_ROLE=HOST's own TinyUSB config - dual rhport, see
-// mds/2026-08-23_filter_conv_router_with_max3421.md:
+// mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md:
 // - rhport0 = native OTG as a Device (main/usb_device_typec.c, Phase2
 //   type-c output), only actually started when MAX3421E is present.
 // - rhport1 = MAX3421E as Host over SPI (main/usb_host_max3421.c),
@@ -38,7 +38,7 @@
 // not designed to be hammered many times a second, and doing so raced
 // and double-freed the same handle (`assert failed: tlsf_free ...
 // block already marked as free`) - see
-// mds/2026-08-23_rp2040_as_host_bridge_plan.md for the full chase (this
+// mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md for the full chase (this
 // never surfaced with MAX3421E alone since that backend never ran
 // tud_task() at all - only once usb_device_typec.c's type-c output
 // started actually pumping HID reports did tud_task_ext() run often
@@ -75,7 +75,7 @@
 // this sizes that pool, not a hardware channel count like the native
 // OTG's OTG_NUM_HOST_CHAN=8. Revisit if a real multi-device test runs
 // out, same as happened for the native path
-// (mds/2026-08-22_multi_device.md).
+// (mds/usb_hid/2026-08-22_multi_device.md).
 #define CFG_TUH_MAX3421_ENDPOINT_TOTAL  16
 
 #define CFG_TUH_HID             8
@@ -89,7 +89,7 @@
 // sequenced after this one's completion callback) reproducibly caused
 // the wireless mouse dongle to occasionally serve a wrong-length
 // (Boot-shaped) report - see
-// mds/2026-08-23_filter_conv_router_with_max3421.md. Whatever the exact
+// mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md. Whatever the exact
 // mechanism, empirically: touch this dongle's protocol negotiation only
 // once, not twice.
 

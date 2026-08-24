@@ -2,7 +2,7 @@
 # unchanged behavior - USB HID device connected to the Target PC) or HOST
 # (USB Host reading a physical keyboard/mouse, forwarding it over WiFi to
 # a Device-role board). Pass -D KVM_ROLE=HOST to idf.py to switch; see
-# bin/build_host.sh / bin/build_device.sh and mds/2026-08-21_usb_host.md.
+# bin/build_host.sh / bin/build_device.sh and mds/usb_hid/2026-08-21_usb_host.md.
 #
 # Deliberately not a Kconfig choice: flipping a Kconfig value regenerates
 # sdkconfig.h, which forces a near-full project rebuild. A plain CMake

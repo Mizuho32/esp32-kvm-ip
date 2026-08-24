@@ -5,13 +5,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Host role only (KVM_ROLE=HOST). See mds/2026-08-21_host_report_protocol.md.
+// Host role only (KVM_ROLE=HOST). See mds/usb_hid/2026-08-21_host_report_protocol.md.
 //
 // Minimal HID Report Descriptor parser, scoped to what a mouse and a
 // keyboard's Consumer Control ("media keys") interface need: Generic
 // Desktop X/Y/Wheel, Button page buttons, Consumer AC Pan (horizontal
 // scroll), and a Consumer usage-ID selector - see
-// mds/2026-08-22_consumer_control.md. Report Protocol layouts are
+// mds/usb_hid/2026-08-22_consumer_control.md. Report Protocol layouts are
 // device-specific (unlike Boot Protocol's fixed layout), so this has to
 // be parsed per device rather than assumed.
 //

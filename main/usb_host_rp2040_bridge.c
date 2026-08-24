@@ -28,7 +28,7 @@
 #define BRIDGE_UART_RX_PIN 6
 #define BRIDGE_UART_BAUD  460800
 
-// Frame format (see mds/2026-08-23_rp2040_as_host_bridge_plan.md):
+// Frame format (see mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md):
 //   [0xAA sync][msg_type][dev_addr][idx][itf_protocol][len_lo][len_hi][payload...][checksum]
 // checksum = XOR of every byte from msg_type through the last payload
 // byte (i.e. everything except the sync byte itself). A byte stream, not
@@ -46,7 +46,7 @@ typedef enum {
     // RP2040-side RATE_MONITOR stats (rp2040_host_bridge.ino), sent once
     // a second over this same link so they show up here without a
     // separate USB-serial adapter wired to the RP2040's Serial2 - see
-    // mds/2026-08-24_rp2040_bridge_fps_investigation.md. Payload: 3x
+    // mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md. Payload: 3x
     // uint32 LE (reports_per_sec, min_interval_us, max_interval_us).
     BRIDGE_MSG_STATS     = 0x05,
 } bridge_msg_type_t;
@@ -62,7 +62,7 @@ typedef enum {
 #define MAX_PAYLOAD_LEN 512
 
 // Toggle for a report-rate/checksum-failure counter, printed once a
-// second via ESP_LOGI (mds/2026-08-24_rp2040_bridge_fps_investigation.md
+// second via ESP_LOGI (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md
 // measurement plan, point 2). The RP2040 side's own RATE_MONITOR/
 // POLL_CEILING_TEST confirmed it emits a clean ~100Hz - this counts how
 // many REPORT frames actually reach dispatch_report() here per second,
@@ -71,9 +71,9 @@ typedef enum {
 // lost/delayed. A once-a-second summary line, not a per-frame dump -
 // the per-frame raw-report dump in dispatch_report() below is what
 // perturbed timing while chasing the type-c crash
-// (mds/2026-08-23_rp2040_host_status.md); this shouldn't have that
+// (mds/usb_hid/2026-08-23_rp2040_host_status.md); this shouldn't have that
 // problem.
-// Back to 1 - disabling this entirely (mds/2026-08-24_rp2040_bridge_fps_investigation.md)
+// Back to 1 - disabling this entirely (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md)
 // did NOT change the choppy-cursor symptom, ruling out "the diagnostic
 // logging itself is the cause". Re-enabled to keep visibility while
 // testing BRIDGE_MINIMAL_TEST below.
@@ -118,7 +118,7 @@ static uint32_t s_max_interval_us; // the "quiet gap" size, if delivery is burst
 // also calls uart_read_bytes()) showed the reports/sec actually
 // reaching here dropping far below what the RP2040 side independently
 // measured itself sending (~100Hz, 0 drops -
-// mds/2026-08-24_rp2040_bridge_fps_investigation.md) - with zero
+// mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md) - with zero
 // checksum failures the whole time. That combination means bytes were
 // being lost *before* ever reaching feed_byte()'s state machine (a
 // checksum failure only fires for a byte stream that did reach the
@@ -241,7 +241,7 @@ static bridge_mouse_state_t *register_mouse_device(uint8_t dev_addr, uint8_t idx
     // currently-mounted devices (so this ESP32 side learns about them
     // even if it reboots mid-session, e.g. reflashing firmware, while
     // RP2040 itself keeps running - see
-    // mds/2026-08-23_rp2040_as_host_bridge_plan.md). Without this check,
+    // mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md). Without this check,
     // every re-announcement would append a fresh duplicate entry until
     // MAX_MOUSE_DEVICES filled up and further (re-)mounts silently
     // failed.
@@ -367,7 +367,7 @@ static void dispatch_mount(uint8_t dev_addr, uint8_t idx, uint8_t itf_protocol,
     // Logging (especially the report-descriptor hex dump) used to fire
     // unconditionally on *every* call, including every re-announce, not
     // just the actual first mount - harmless on its own, but once the
-    // UART read timeout fix (mds/2026-08-24_rp2040_bridge_fps_investigation.md)
+    // UART read timeout fix (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md)
     // made the rest of the pipeline smooth, that synchronous console
     // output every 2s became a noticeable periodic hitch by itself. Only
     // log when the device wasn't already known.
@@ -428,7 +428,7 @@ static void dispatch_report(uint8_t dev_addr, uint8_t idx, uint8_t itf_protocol,
     // Debug aid - see usb_host_max3421.c's equivalent toggle. Confirms
     // whether a REPORT frame actually arrived intact over UART (checksum
     // passed) before it gets this far. Toggled OFF (was toggled on while
-    // chasing the type-c crash, mds/2026-08-23_rp2040_host_status.md) -
+    // chasing the type-c crash, mds/usb_hid/2026-08-23_rp2040_host_status.md) -
     // suspected contributor to the type-c latency being worse than UDP
     // (synchronous UART0/console log output on every single report).
     /*
@@ -618,7 +618,7 @@ static UBaseType_t  s_prev_task_count;
 // since boot - a single ~50-80ms stall is under 1% of many seconds of
 // uptime, indistinguishable from noise against tasks like IDLE0/IDLE1
 // that dominate the cumulative total simply by existing the whole time
-// (mds/2026-08-24_rp2040_bridge_fps_investigation.md's first attempt
+// (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md's first attempt
 // showed exactly this: IDLE0/IDLE1 at 93-95%, everything else <1%,
 // nothing pointing at a culprit). Snapshotting uxTaskGetSystemState()
 // every window and diffing against the previous snapshot instead makes
@@ -661,7 +661,7 @@ static void bridge_task(void *arg)
     // RP2040 itself (rp2040_host_bridge.ino's own RATE_MONITOR, checked
     // directly over its Serial2 debug port) measured a rock-solid
     // ~10000us +-6us report cadence with zero bursting -
-    // mds/2026-08-24_rp2040_bridge_fps_investigation.md follow-up. That
+    // mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md follow-up. That
     // clears the RP2040/mouse/dongle entirely, meaning the ~12-50us min
     // / ~50ms max interval spread measured *here* has to come from this
     // task not getting scheduled promptly, not from data arriving late.
@@ -686,7 +686,7 @@ static void bridge_task(void *arg)
         last_loop_us = loop_now_us;
 #endif
         // Temporarily 1ms (was 20) - diagnostic test
-        // (mds/2026-08-24_rp2040_bridge_fps_investigation.md): with
+        // (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md): with
         // WiFi/type-c/dispatch_task all removed and the CPU otherwise
         // ~99% idle, bridge_task still saw ~50ms loop gaps. If shrinking
         // this timeout shrinks the observed gap proportionally, the

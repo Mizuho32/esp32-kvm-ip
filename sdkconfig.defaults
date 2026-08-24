@@ -21,7 +21,7 @@ CONFIG_FREERTOS_UNICORE=n
 
 # Runtime per-task CPU stats (vTaskGetRunTimeStats()) - used to find
 # what's starving usb_host_rp2040_bridge.c's bridge_task for tens of ms
-# at a time (mds/2026-08-24_rp2040_bridge_fps_investigation.md). Trace
+# at a time (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md). Trace
 # facility is a prerequisite for the runtime-stats option.
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y

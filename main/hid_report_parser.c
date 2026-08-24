@@ -263,7 +263,7 @@ static void consumer_input_slot_cb(void *ctx, uint16_t page, uint32_t usage, boo
 
     // First non-constant Consumer-page field wide enough to hold a real
     // usage ID (rules out 1-bit-per-key "bitmap" fields, which this
-    // doesn't support - see mds/2026-08-22_consumer_control.md). Keep
+    // doesn't support - see mds/usb_hid/2026-08-22_consumer_control.md). Keep
     // only the first match; a descriptor with more than one such field
     // is unusual and not worth guessing between.
     if (out->selector.present || page != USAGE_PAGE_CONSUMER || bit_length < 8) {
@@ -275,7 +275,7 @@ static void consumer_input_slot_cb(void *ctx, uint16_t page, uint32_t usage, boo
     // different Report ID) on the very same physical HID interface as
     // the real Consumer Control selector, so it has to be excluded by
     // name rather than just by width - see
-    // mds/2026-08-22_consumer_control.md.
+    // mds/usb_hid/2026-08-22_consumer_control.md.
     if (have_usage && usage == USAGE_CONSUMER_AC_PAN) {
         return;
     }

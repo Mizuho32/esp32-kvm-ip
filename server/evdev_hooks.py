@@ -1,7 +1,7 @@
 """
 Linux input capture backend (evdev + EVIOCGRAB).
 
-Keyboard-only for now (see mds/2026-08-20_server.md for rationale).
+Keyboard-only for now (see mds/usb_hid/2026-08-20_server.md for rationale).
 Mouse state in InputState is left untouched, so the Host PC's mouse
 keeps working normally regardless of KVM mode.
 

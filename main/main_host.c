@@ -1,4 +1,4 @@
-// Host role (KVM_ROLE=HOST) entry point. See mds/2026-08-21_usb_host.md.
+// Host role (KVM_ROLE=HOST) entry point. See mds/usb_hid/2026-08-21_usb_host.md.
 //
 // Reads a physical USB keyboard/mouse plugged into this board's USB OTG
 // port (in USB Host mode) and forwards it over WiFi/UDP to a Device-role
@@ -29,7 +29,7 @@
 // only its UART-parsing bridge_task, not even dispatch_task). Isolates
 // whether WiFi/lwIP or the TinyUSB Device stack are what's starving
 // bridge_task for tens of ms at a time
-// (mds/2026-08-24_rp2040_bridge_fps_investigation.md) - disabling just
+// (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md) - disabling just
 // their console logging didn't change the symptom, so this removes the
 // subsystems themselves rather than just their logging.
 #define HOST_MINIMAL_TEST 0
@@ -74,8 +74,8 @@ void app_main(void)
 
     // Exactly one Host backend runs, never more than one - see
     // usb_host_max3421.h, usb_host_rp2040_bridge.h and
-    // mds/2026-08-23_filter_conv_router_with_max3421.md /
-    // mds/2026-08-23_rp2040_as_host_bridge_plan.md. RP2040 bridge is
+    // mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md /
+    // mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md. RP2040 bridge is
     // tried first (currently the preferred backend - see the RP2040 doc
     // for why), then MAX3421E, then native OTG as the last-resort
     // fallback. Whichever of the first two backends is used, native OTG

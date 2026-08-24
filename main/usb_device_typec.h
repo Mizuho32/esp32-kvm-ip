@@ -8,7 +8,7 @@
 
 /**
  * Host role only (KVM_ROLE=HOST), MAX3421E backend only
- * (mds/2026-08-23_filter_conv_router_with_max3421.md's Phase2). Once
+ * (mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md's Phase2). Once
  * MAX3421E takes over Host duties over SPI, this board's own native
  * USB-OTG port is unused by anything else - this brings it up as a
  * plain USB HID device (reusing usb_descriptors.c/usb_descriptors.h, the

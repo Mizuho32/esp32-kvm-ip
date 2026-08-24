@@ -14,7 +14,7 @@
 // its actual #define content is inert. See
 // components/tinyusb/host_config/tusb_config.h for where the Host role's
 // (KVM_ROLE=HOST) TinyUSB Host + MAX3421E config actually lives instead
-// (mds/2026-08-23_filter_conv_router_with_max3421.md).
+// (mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md).
 
 // Role: Device
 #define CFG_TUSB_RHPORT0_MODE   OPT_MODE_DEVICE

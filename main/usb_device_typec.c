@@ -72,12 +72,12 @@ bool usb_device_typec_connected(void)
 // Debug toggle for the sent=/dropped= logging that used to be here - see
 // usb_host_rp2040_bridge.c's/usb_host_max3421.c's equivalent raw-report
 // dump toggles. Off by default (was on while chasing the type-c crash,
-// mds/2026-08-23_rp2040_host_status.md).
+// mds/usb_hid/2026-08-23_rp2040_host_status.md).
 #define USB_DEVICE_TYPEC_DEBUG 0
 
 // Toggle for a wait_for_ready() blocking-frequency/duration counter,
 // printed once a second via ESP_LOGI
-// (mds/2026-08-24_rp2040_bridge_fps_investigation.md measurement plan,
+// (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md measurement plan,
 // point 3). RP2040-side and UART-side rates were confirmed clean (~100Hz,
 // no checksum failures) - this checks whether USB-side backpressure
 // (tud_hid_n_ready() not yet true - e.g. the PC not polling the IN
@@ -87,7 +87,7 @@ bool usb_device_typec_connected(void)
 // BRIDGE_RATE_MONITOR - see its comment. Testing whether the console
 // logging these toggles produce (UART0, 115200 baud, blocking) is
 // itself a significant contributor to the bursty delivery being
-// investigated (mds/2026-08-24_rp2040_bridge_fps_investigation.md).
+// investigated (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md).
 #define USB_DEVICE_TYPEC_RATE_MONITOR 0
 
 #if USB_DEVICE_TYPEC_RATE_MONITOR

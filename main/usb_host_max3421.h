@@ -7,7 +7,7 @@
 
 /**
  * Host role only (KVM_ROLE=HOST). MAX3421E USB Host path
- * (mds/2026-08-23_filter_conv_router_with_max3421.md): brings up TinyUSB
+ * (mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md): brings up TinyUSB
  * in Host mode over SPI (components/tinyusb's locally-overridden
  * Host+MAX3421 build, see components/tinyusb/CMakeLists.txt and
  * components/tinyusb/host_config/tusb_config.h), parses HID Report
@@ -15,7 +15,7 @@
  * keyboard/mouse/Consumer Control samples through hid_forwarder.h - the
  * same pipeline usb_host_task.c's native OTG path uses. Confirmed on
  * real hardware to deliver full Report ID-tagged Report Protocol data
- * (see mds/2026-08-22_rp2040_host_check.md's RP2040 cross-test, which
+ * (see mds/usb_hid/2026-08-22_rp2040_host_check.md's RP2040 cross-test, which
  * this mirrors), so - unlike usb_host_task.c - carries no workaround for
  * the wireless dongle's 3-byte truncation quirk.
  *
@@ -23,7 +23,7 @@
  * usb_host_max3421_probe() below. main_host.c starts exactly one of the
  * two backends at boot, never both, so that when MAX3421E is present the
  * native OTG peripheral is left free for a future USB Device (type-c)
- * output path - mds/2026-08-23_filter_conv_router_with_max3421.md's
+ * output path - mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md's
  * Phase2.
  */
 

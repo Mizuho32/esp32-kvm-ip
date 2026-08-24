@@ -118,7 +118,7 @@ TU_ATTR_ALWAYS_INLINE static inline void dwc2_clock_init(uint8_t rhport, tusb_ro
 // Idempotent - unlike upstream, which unconditionally calls
 // esp_intr_alloc()/esp_intr_free() every time regardless of whether
 // usb_ih[rhport] is already allocated/already freed. Root cause of why
-// this ever mattered (mds/2026-08-23_rp2040_as_host_bridge_plan.md):
+// this ever mattered (mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md):
 // CFG_TUSB_OS was missing from tusb_config.h, silently defaulting to
 // OPT_OS_NONE - whose osal_none.h queue implementation locks by
 // disabling/re-enabling this very interrupt (via dcd_int_enable()/

@@ -16,8 +16,8 @@
 //
 // Applied to every report read from a physical USB HID device, right
 // before usb_host_task.c packs it into the same UDP protocol
-// server.py/protocol.h uses - see mds/2026-08-21_filter_conv_route.md
-// for the design rationale and mds/2026-08-21_host_report_protocol.md
+// server.py/protocol.h uses - see mds/usb_hid/2026-08-21_filter_conv_route.md
+// for the design rationale and mds/usb_hid/2026-08-21_host_report_protocol.md
 // for how Report vs Boot Protocol selection works on this (Host) side.
 //
 // Keyboards stay on Boot Protocol (modifiers + up to 6 keycodes - see

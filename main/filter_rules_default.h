@@ -12,8 +12,8 @@
 // To customize: copy filter_rules.h.example to filter_rules.h (gitignored,
 // like wifi_credentials.h) and edit it. hid_forwarder.c picks whichever
 // one exists (filter_rules.h if present, this file otherwise) - see the
-// __has_include check there. See mds/2026-08-21_filter_conv_route.md
-// and mds/2026-08-21_host_report_protocol.md for the design rationale and
+// __has_include check there. See mds/usb_hid/2026-08-21_filter_conv_route.md
+// and mds/usb_hid/2026-08-21_host_report_protocol.md for the design rationale and
 // what each parameter means.
 //
 // filter_mouse_report()'s edits only shape the type-c-bound copy (rough

@@ -6,7 +6,7 @@ Captures keyboard/mouse input and sends it as UDP packets to ESP32-S3.
 Windows: keyboard + mouse, via WinAPI low-level hooks + Raw Input
          (winapi_hooks.py).
 Linux:   keyboard only for now, via evdev + EVIOCGRAB (evdev_hooks.py).
-         See mds/2026-08-20_server.md for why mouse isn't ported yet.
+         See mds/usb_hid/2026-08-20_server.md for why mouse isn't ported yet.
          Requires the running user to be in the 'input' group.
 
 Usage:

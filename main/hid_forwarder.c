@@ -25,7 +25,7 @@
 #endif
 
 // route_rules.h: same personal-copy-or-default pattern, but for UDP vs
-// type-c routing (Phase2, mds/2026-08-23_filter_conv_router_with_max3421.md)
+// type-c routing (Phase2, mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md)
 // rather than filtering/remapping - only consulted while type-c is
 // actually connected (usb_device_typec_connected()).
 #if __has_include("route_rules.h")
@@ -134,7 +134,7 @@ static void compute_merged_keyboard_report(uint8_t *modifiers, uint8_t keycodes[
 // always goes there; route_rules.h decides whether it *also* gets
 // mirrored over UDP. Otherwise (not connected, or no MAX3421E at all -
 // see main_host.c) everything goes over UDP as before Phase2 - see
-// mds/2026-08-23_filter_conv_router_with_max3421.md.
+// mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md.
 static void dispatch_merged_keyboard_report(void)
 {
     uint8_t modifiers;
