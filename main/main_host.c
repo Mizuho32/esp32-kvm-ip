@@ -23,6 +23,17 @@
 
 #define TAG "MAIN_HOST"
 
+// When 1: skip WiFi, hid_forwarder (UDP socket), and the type-c USB
+// Device output entirely - only the RP2040 bridge backend runs (and,
+// if usb_host_rp2040_bridge.c's own BRIDGE_MINIMAL_TEST is also set,
+// only its UART-parsing bridge_task, not even dispatch_task). Isolates
+// whether WiFi/lwIP or the TinyUSB Device stack are what's starving
+// bridge_task for tens of ms at a time
+// (mds/2026-08-24_rp2040_bridge_fps_investigation.md) - disabling just
+// their console logging didn't change the symptom, so this removes the
+// subsystems themselves rather than just their logging.
+#define HOST_MINIMAL_TEST 1
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32-S3 KVM (Host role) starting...");
@@ -38,6 +49,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized");
 
+#if !HOST_MINIMAL_TEST
     // Distinct from the Device role's WIFI_HOSTNAME (both roles share the
     // same wifi_credentials.h) so the two boards don't show up under the
     // same DHCP lease name.
@@ -56,6 +68,9 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(5000));
         esp_restart();
     }
+#else
+    ESP_LOGW(TAG, "HOST_MINIMAL_TEST: skipping WiFi/hid_forwarder/type-c entirely");
+#endif
 
     // Exactly one Host backend runs, never more than one - see
     // usb_host_max3421.h, usb_host_rp2040_bridge.h and
@@ -94,6 +109,7 @@ void app_main(void)
         }
     }
 
+#if !HOST_MINIMAL_TEST
     if (typec_capable) {
         // Native OTG is free (whichever backend above is in use isn't
         // using it) - bring it up as a type-c USB Device output (Phase2).
@@ -103,7 +119,14 @@ void app_main(void)
             ESP_LOGW(TAG, "type-c USB Device output failed to start (not fatal - continuing UDP-only)");
         }
     }
+#else
+    (void)typec_capable;
+#endif
 
     status_led_set(true);
+#if !HOST_MINIMAL_TEST
     ESP_LOGI(TAG, "System ready - forwarding USB HID input to %s:%d", KVM_TARGET_HOST, UDP_PORT);
+#else
+    ESP_LOGI(TAG, "HOST_MINIMAL_TEST ready - bridge_task running standalone");
+#endif
 }

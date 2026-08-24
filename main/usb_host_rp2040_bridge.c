@@ -73,21 +73,20 @@ typedef enum {
 // perturbed timing while chasing the type-c crash
 // (mds/2026-08-23_rp2040_host_status.md); this shouldn't have that
 // problem.
-// Temporarily OFF (was 1) to test a suspicion: the per-second console
-// print itself - especially the per-task runtime delta breakdown added
-// alongside it - may be a significant, possibly dominant, contributor
-// to the very "max loop gap"/burst pattern being measured. ESP_LOGx
-// here writes to the UART0 console at 115200 baud
-// (CONFIG_ESP_CONSOLE_UART_BAUDRATE) from directly within bridge_task,
-// and each console print is transmitted synchronously - printing the
-// multi-line per-task breakdown (mds/2026-08-24_rp2040_bridge_fps_investigation.md)
-// alone is a rough ~60ms+ of UART0 airtime at that baud rate, which
-// would block this task from calling uart_read_bytes() again for that
-// long. The escalation across this investigation (bigger console output
-// -> bigger measured "gap") points at the measurement being at least
-// part of the problem it's measuring. Flip back to 1 to resume
-// measuring once this is confirmed/ruled out.
-#define BRIDGE_RATE_MONITOR 0
+// Back to 1 - disabling this entirely (mds/2026-08-24_rp2040_bridge_fps_investigation.md)
+// did NOT change the choppy-cursor symptom, ruling out "the diagnostic
+// logging itself is the cause". Re-enabled to keep visibility while
+// testing BRIDGE_MINIMAL_TEST below.
+#define BRIDGE_RATE_MONITOR 1
+
+// When 1: usb_host_rp2040_bridge_task_start() only starts bridge_task
+// (UART parsing + BRIDGE_RATE_MONITOR's counters), not dispatch_task -
+// isolates whether the bursty delivery survives with genuinely nothing
+// else from this file running. Combine with main_host.c's
+// HOST_MINIMAL_TEST to also strip out WiFi/hid_forwarder/type-c
+// entirely, to test whether *those* (not this file) are what's
+// starving bridge_task.
+#define BRIDGE_MINIMAL_TEST 1
 
 #if BRIDGE_RATE_MONITOR
 static volatile uint32_t s_report_count;
@@ -772,8 +771,10 @@ esp_err_t usb_host_rp2040_bridge_task_start(void)
     if (xTaskCreate(bridge_task, "usb_host_rp2040br", 4096, NULL, 6, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
+#if !BRIDGE_MINIMAL_TEST
     if (xTaskCreate(dispatch_task, "usb_host_rp2040disp", 4096, NULL, 5, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
+#endif
     return ESP_OK;
 }
