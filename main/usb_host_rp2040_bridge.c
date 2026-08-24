@@ -666,7 +666,16 @@ static void bridge_task(void *arg)
         }
         last_loop_us = loop_now_us;
 #endif
-        int n = uart_read_bytes(BRIDGE_UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(20));
+        // Temporarily 1ms (was 20) - diagnostic test
+        // (mds/2026-08-24_rp2040_bridge_fps_investigation.md): with
+        // WiFi/type-c/dispatch_task all removed and the CPU otherwise
+        // ~99% idle, bridge_task still saw ~50ms loop gaps. If shrinking
+        // this timeout shrinks the observed gap proportionally, the
+        // stall is tied to this call's own timeout handling; if the gap
+        // stays ~50ms regardless, it's unrelated to this parameter -
+        // something lower-level (interrupt servicing, invisible to any
+        // task-level runtime stats) is the real cause.
+        int n = uart_read_bytes(BRIDGE_UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(1));
         for (int i = 0; i < n; i++) {
             feed_byte(buf[i]);
         }
