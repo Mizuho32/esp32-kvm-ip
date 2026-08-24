@@ -83,7 +83,12 @@ bool usb_device_typec_connected(void)
 // (tud_hid_n_ready() not yet true - e.g. the PC not polling the IN
 // endpoint fast enough) is where the type-c latency actually comes from.
 // A once-a-second summary line, not per-call.
-#define USB_DEVICE_TYPEC_RATE_MONITOR 1
+// Temporarily OFF (was 1) alongside usb_host_rp2040_bridge.c's
+// BRIDGE_RATE_MONITOR - see its comment. Testing whether the console
+// logging these toggles produce (UART0, 115200 baud, blocking) is
+// itself a significant contributor to the bursty delivery being
+// investigated (mds/2026-08-24_rp2040_bridge_fps_investigation.md).
+#define USB_DEVICE_TYPEC_RATE_MONITOR 0
 
 #if USB_DEVICE_TYPEC_RATE_MONITOR
 static volatile uint32_t s_wait_calls;
