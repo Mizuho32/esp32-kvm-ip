@@ -77,7 +77,7 @@ typedef enum {
 // did NOT change the choppy-cursor symptom, ruling out "the diagnostic
 // logging itself is the cause". Re-enabled to keep visibility while
 // testing BRIDGE_MINIMAL_TEST below.
-#define BRIDGE_RATE_MONITOR 1
+#define BRIDGE_RATE_MONITOR 0
 
 // When 1: usb_host_rp2040_bridge_task_start() only starts bridge_task
 // (UART parsing + BRIDGE_RATE_MONITOR's counters), not dispatch_task -
@@ -360,23 +360,36 @@ static void handle_consumer_report(const consumer_report_layout_t *layout, const
 static void dispatch_mount(uint8_t dev_addr, uint8_t idx, uint8_t itf_protocol,
                           const uint8_t *report_desc, uint16_t desc_len)
 {
-    ESP_LOGI(TAG, "HID mounted: dev_addr=%d idx=%d itf_protocol=%d, report descriptor (%d bytes):",
-             dev_addr, idx, itf_protocol, (int)desc_len);
-    ESP_LOG_BUFFER_HEX(TAG, report_desc, desc_len);
-
+    // RP2040 re-announces currently-mounted devices every
+    // REANNOUNCE_INTERVAL_MS (rp2040_host_bridge.ino, 2s) so an
+    // ESP32-side reboot doesn't lose state - register_mouse_device()/
+    // register_consumer_device() are idempotent for exactly that reason.
+    // Logging (especially the report-descriptor hex dump) used to fire
+    // unconditionally on *every* call, including every re-announce, not
+    // just the actual first mount - harmless on its own, but once the
+    // UART read timeout fix (mds/2026-08-24_rp2040_bridge_fps_investigation.md)
+    // made the rest of the pipeline smooth, that synchronous console
+    // output every 2s became a noticeable periodic hitch by itself. Only
+    // log when the device wasn't already known.
     if (itf_protocol == ITF_PROTOCOL_MOUSE) {
+        bool is_new = find_mouse_device(dev_addr, idx) == NULL;
         bridge_mouse_state_t *dev = register_mouse_device(dev_addr, idx);
         if (dev && report_desc && desc_len > 0) {
             hid_parse_mouse_report_descriptor(report_desc, desc_len, &dev->layout);
             dev->use_report_protocol = dev->layout.x.present && dev->layout.y.present;
 
             hid_parse_consumer_report_descriptor(report_desc, desc_len, &dev->consumer_layout);
-            if (dev->consumer_layout.selector.present) {
-                ESP_LOGI(TAG, "Mouse also has a bundled Consumer Control selector (report_id=%d bit_length=%d)",
-                         dev->consumer_layout.selector.report_id, dev->consumer_layout.selector.bit_length);
+            if (is_new) {
+                ESP_LOGI(TAG, "HID mounted: dev_addr=%d idx=%d itf_protocol=%d, report descriptor (%d bytes):",
+                         dev_addr, idx, itf_protocol, (int)desc_len);
+                ESP_LOG_BUFFER_HEX(TAG, report_desc, desc_len);
+                if (dev->consumer_layout.selector.present) {
+                    ESP_LOGI(TAG, "Mouse also has a bundled Consumer Control selector (report_id=%d bit_length=%d)",
+                             dev->consumer_layout.selector.report_id, dev->consumer_layout.selector.bit_length);
+                }
+                ESP_LOGI(TAG, "Mouse connected (use_report_protocol=%d buttons=%d wheel=%d pan=%d)",
+                         dev->use_report_protocol, dev->layout.button_count, dev->layout.wheel.present, dev->layout.pan.present);
             }
-            ESP_LOGI(TAG, "Mouse connected (use_report_protocol=%d buttons=%d wheel=%d pan=%d)",
-                     dev->use_report_protocol, dev->layout.button_count, dev->layout.wheel.present, dev->layout.pan.present);
         }
     } else if (itf_protocol == ITF_PROTOCOL_NONE) {
         consumer_report_layout_t layout = {0};
@@ -384,11 +397,17 @@ static void dispatch_mount(uint8_t dev_addr, uint8_t idx, uint8_t itf_protocol,
             hid_parse_consumer_report_descriptor(report_desc, desc_len, &layout);
         }
         if (layout.selector.present) {
+            bool is_new = find_consumer_device(dev_addr, idx) == NULL;
             bridge_consumer_state_t *dev = register_consumer_device(dev_addr, idx);
             if (dev) {
                 dev->layout = layout;
-                ESP_LOGI(TAG, "Consumer Control device connected (media keys): bit_offset=%d bit_length=%d report_id=%d",
-                         layout.selector.bit_offset, layout.selector.bit_length, layout.selector.report_id);
+                if (is_new) {
+                    ESP_LOGI(TAG, "HID mounted: dev_addr=%d idx=%d itf_protocol=%d, report descriptor (%d bytes):",
+                             dev_addr, idx, itf_protocol, (int)desc_len);
+                    ESP_LOG_BUFFER_HEX(TAG, report_desc, desc_len);
+                    ESP_LOGI(TAG, "Consumer Control device connected (media keys): bit_offset=%d bit_length=%d report_id=%d",
+                             layout.selector.bit_offset, layout.selector.bit_length, layout.selector.report_id);
+                }
             }
         }
     }
