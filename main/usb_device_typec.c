@@ -88,7 +88,7 @@ bool usb_device_typec_connected(void)
 // logging these toggles produce (UART0, 115200 baud, blocking) is
 // itself a significant contributor to the bursty delivery being
 // investigated (mds/2026-08-24_rp2040_bridge_fps_investigation.md).
-#define USB_DEVICE_TYPEC_RATE_MONITOR 0
+#define USB_DEVICE_TYPEC_RATE_MONITOR 1
 
 #if USB_DEVICE_TYPEC_RATE_MONITOR
 static volatile uint32_t s_wait_calls;

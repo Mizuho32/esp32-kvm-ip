@@ -86,7 +86,7 @@ typedef enum {
 // HOST_MINIMAL_TEST to also strip out WiFi/hid_forwarder/type-c
 // entirely, to test whether *those* (not this file) are what's
 // starving bridge_task.
-#define BRIDGE_MINIMAL_TEST 1
+#define BRIDGE_MINIMAL_TEST 0
 
 #if BRIDGE_RATE_MONITOR
 static volatile uint32_t s_report_count;

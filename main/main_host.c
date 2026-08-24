@@ -32,7 +32,7 @@
 // (mds/2026-08-24_rp2040_bridge_fps_investigation.md) - disabling just
 // their console logging didn't change the symptom, so this removes the
 // subsystems themselves rather than just their logging.
-#define HOST_MINIMAL_TEST 1
+#define HOST_MINIMAL_TEST 0
 
 void app_main(void)
 {
