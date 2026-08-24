@@ -577,6 +577,49 @@ static void feed_byte(uint8_t b)
     }
 }
 
+#if BRIDGE_RATE_MONITOR
+#define MAX_RUNTIME_TASKS 24
+static TaskStatus_t s_prev_task_status[MAX_RUNTIME_TASKS];
+static UBaseType_t  s_prev_task_count;
+
+// vTaskGetRunTimeStats() (tried first) reports cumulative run time
+// since boot - a single ~50-80ms stall is under 1% of many seconds of
+// uptime, indistinguishable from noise against tasks like IDLE0/IDLE1
+// that dominate the cumulative total simply by existing the whole time
+// (mds/2026-08-24_rp2040_bridge_fps_investigation.md's first attempt
+// showed exactly this: IDLE0/IDLE1 at 93-95%, everything else <1%,
+// nothing pointing at a culprit). Snapshotting uxTaskGetSystemState()
+// every window and diffing against the previous snapshot instead makes
+// an 80ms stall obviously visible - 8% of a ~1s window - against
+// whichever task actually consumed it that window.
+static void snapshot_task_runtime(bool print, uint32_t loop_gap_us)
+{
+    static TaskStatus_t status[MAX_RUNTIME_TASKS];
+    uint32_t total_runtime;
+    UBaseType_t count = uxTaskGetSystemState(status, MAX_RUNTIME_TASKS, &total_runtime);
+
+    if (print) {
+        ESP_LOGW(TAG, "[rate] loop gap %uus - per-task CPU delta over last ~1s:", (unsigned)loop_gap_us);
+        for (UBaseType_t i = 0; i < count; i++) {
+            uint32_t prev = 0;
+            for (UBaseType_t j = 0; j < s_prev_task_count; j++) {
+                if (s_prev_task_status[j].xHandle == status[i].xHandle) {
+                    prev = s_prev_task_status[j].ulRunTimeCounter;
+                    break;
+                }
+            }
+            uint32_t delta = status[i].ulRunTimeCounter - prev;
+            if (delta > 0) {
+                ESP_LOGW(TAG, "  %-16s %uus", status[i].pcTaskName, (unsigned)delta);
+            }
+        }
+    }
+
+    memcpy(s_prev_task_status, status, sizeof(TaskStatus_t) * count);
+    s_prev_task_count = count;
+}
+#endif
+
 static void bridge_task(void *arg)
 {
     (void)arg;
@@ -636,17 +679,11 @@ static void bridge_task(void *arg)
 
             // A loop gap far beyond uart_read_bytes()'s own 20ms
             // timeout means something else held the CPU long enough to
-            // starve this (priority 6) task - dump per-task runtime
-            // stats (sdkconfig.defaults: CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS)
-            // to see which task actually consumed that time. Only when
-            // it happens (not every window) since vTaskGetRunTimeStats()
-            // itself isn't free and this is diagnostic-only.
-            if (loop_gap_print > 5000) {
-                static char stats_buf[1024];
-                vTaskGetRunTimeStats(stats_buf);
-                ESP_LOGW(TAG, "[rate] loop gap %uus - task runtime stats (name/abs-time/%%):\n%s",
-                         (unsigned)loop_gap_print, stats_buf);
-            }
+            // starve this (priority 6) task - see which task actually
+            // consumed that time (snapshot every window regardless, to
+            // keep the delta baseline current; only print detail on the
+            // windows where something anomalous happened).
+            snapshot_task_runtime(loop_gap_print > 5000, loop_gap_print);
         }
 #endif
     }
