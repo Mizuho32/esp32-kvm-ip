@@ -70,6 +70,11 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     ESP_LOGI(TAG, "WiFi power save disabled");
 
+    // Must run after wifi_manager_init() (lwIP's TCP/IP thread needs to
+    // be up for getaddrinfo() to work) - see mruby_filter.h and
+    // mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
+    mruby_filter_resolve_udp_sinks();
+
     if (hid_forwarder_init() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init HID forwarder (UDP socket). Restarting in 5s...");
         vTaskDelay(pdMS_TO_TICKS(5000));

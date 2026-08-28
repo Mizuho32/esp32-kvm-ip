@@ -1,35 +1,36 @@
-# Phase1 default script: pure passthrough, straight through to UDP/type-c
-# exactly like filter_rules_default.h/route_rules_default.h - proves the
-# mruby plumbing (VM init, script load, mrb_funcall round trips) works on
-# real hardware before any real filter/route DSL logic gets written here.
-# See mds/usb_hid/2026-08-28_mruby_filter_route.md.
+# Default script (DSL version): pure passthrough, equivalent to
+# filter_rules_default.h/route_rules_default.h (type-c only while
+# connected, no remap/drop, no UDP mirror). See
+# mds/usb_hid/2026-08-28_mruby_filter_route.md (design) and
+# mds/usb_hid/2026-08-29_mruby_phase1_impl.md (implementation notes,
+# including where this DSL implementation deliberately simplifies the
+# original design sketch).
 #
 # This is embedded into the firmware image at build time (EMBED_TXTFILES,
-# main/CMakeLists.txt) - it is NOT yet loaded from a writable
-# partition/WebUI (that's Phase2). Edit this file and reflash to change
-# behavior, same as filter_rules.h today.
+# main/CMakeLists.txt) - it's the fallback used whenever nothing has been
+# uploaded to the mrb_script partition (bin/upload_mruby_script.py).
 
 # hostname "esp32-kvm-ip-host"   # uncomment to set - default is noset
-#                                 # (chip's own default hostname is left
-#                                 # alone). See mruby_filter.h.
 
-def filter_keyboard(modifiers, keycodes)
-  [modifiers, keycodes, true]
+source :local_kbd,   :usb_host, kind: :keyboard
+source :local_mouse, :usb_host, kind: :mouse
+source :local_cc,    :usb_host, kind: :consumer
+
+sink :typec_kbd,   :typec, kind: :keyboard
+sink :typec_mouse, :typec, kind: :mouse
+sink :typec_cc,    :typec, kind: :consumer
+
+pipeline :keyboard do
+  from :local_kbd
+  to :typec_kbd   # no block = pure passthrough fan-out
 end
 
-def filter_mouse(buttons, dx, dy, wheel, pan)
-  # buttons, dx, dy, wheel, pan, synth_modifiers, synth_keycode, forward_typec
-  [buttons, dx, dy, wheel, pan, 0, 0, true]
+pipeline :mouse do
+  from :local_mouse
+  to :typec_mouse
 end
 
-def route_keyboard_udp(modifiers, keycodes)
-  false
-end
-
-def route_mouse_udp(buttons, dx, dy, wheel, pan)
-  false
-end
-
-def route_consumer_udp(usage_id)
-  false
+pipeline :consumer do
+  from :local_cc
+  to :typec_cc
 end

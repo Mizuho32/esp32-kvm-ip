@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "esp_err.h"
+#include "lwip/sockets.h"
 
 /**
  * Host role only (KVM_ROLE=HOST). Shared forwarding pipeline used by
@@ -44,5 +45,15 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
  * (0 = release) - not run through filter_rules.h (yet), matching how
  * this has worked so far (mds/usb_hid/2026-08-22_consumer_control.md). */
 void hid_forwarder_consumer(uint16_t usage_id);
+
+/** Send a report over UDP to an arbitrary destination, not just the
+ * fixed KVM_TARGET_HOST every hid_forwarder_*() call above falls back
+ * to. Used by mruby_filter.c's DSL `sink :name, :udp, host:, port:` to
+ * fan a report out to any number of named UDP targets - see
+ * mds/usb_hid/2026-08-29_mruby_phase1_impl.md. Uses the same socket and
+ * protocol.h packet format as the rest of this file. */
+void hid_forwarder_send_keyboard_to(const struct sockaddr_in *dest, uint8_t modifiers, const uint8_t keycodes[6]);
+void hid_forwarder_send_mouse_to(const struct sockaddr_in *dest, uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan);
+void hid_forwarder_send_consumer_to(const struct sockaddr_in *dest, uint16_t usage_id);
 
 #endif

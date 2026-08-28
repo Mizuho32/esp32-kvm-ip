@@ -35,8 +35,9 @@
 #endif
 
 // mruby_filter_active() picks between this file (filter_rules.h/route_rules.h)
-// and an embedded mruby script for every filter/route decision below - see
-// mds/usb_hid/2026-08-28_mruby_filter_route.md. filter_rules.h/route_rules.h
+// and an embedded/uploaded mruby script's source/sink/pipeline DSL for
+// every report - see mds/usb_hid/2026-08-28_mruby_filter_route.md and
+// mds/usb_hid/2026-08-29_mruby_phase1_impl.md. filter_rules.h/route_rules.h
 // stay fully wired up as the always-available C fallback, not dead code.
 #include "mruby_filter.h"
 
@@ -48,9 +49,10 @@ static uint32_t s_seq;
 
 // Merged keyboard state: a physical keyboard's own keys and any
 // mouse-triggered synthetic keys (e.g. back/forward -> Alt+arrow, see
-// filter_rules.h) both contribute to one combined report - whichever
-// backend/device sent last would otherwise silently overwrite the
-// other's held keys (the UDP protocol carries full state, not deltas).
+// filter_rules.h/mruby's mouse_synth_keys hook) both contribute to one
+// combined report - whichever backend/device sent last would otherwise
+// silently overwrite the other's held keys (the UDP protocol carries
+// full state, not deltas).
 static uint8_t s_kbd_modifiers;
 static uint8_t s_kbd_keycodes[6];
 static uint8_t s_synth_modifiers;
@@ -76,15 +78,15 @@ static bool resolve_target(void)
     return true;
 }
 
-static void send_udp_packet(const udp_packet_t *pkt)
+static void send_udp_packet_to(const udp_packet_t *pkt, const struct sockaddr_in *dest)
 {
     if (s_sock < 0) {
         return;
     }
-    sendto(s_sock, pkt, PACKET_SIZE, 0, (struct sockaddr *)&s_target_addr, sizeof(s_target_addr));
+    sendto(s_sock, pkt, PACKET_SIZE, 0, (struct sockaddr *)dest, sizeof(*dest));
 }
 
-static void send_keyboard_report_raw(uint8_t modifiers, const uint8_t keycodes[6])
+void hid_forwarder_send_keyboard_to(const struct sockaddr_in *dest, uint8_t modifiers, const uint8_t keycodes[6])
 {
     udp_packet_t pkt = {
         .magic    = PACKET_MAGIC,
@@ -94,10 +96,10 @@ static void send_keyboard_report_raw(uint8_t modifiers, const uint8_t keycodes[6
     pkt.keyboard.modifiers = modifiers;
     pkt.keyboard.reserved  = 0;
     memcpy(pkt.keyboard.keycodes, keycodes, 6);
-    send_udp_packet(&pkt);
+    send_udp_packet_to(&pkt, dest);
 }
 
-static void send_mouse_report_raw(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
+void hid_forwarder_send_mouse_to(const struct sockaddr_in *dest, uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
 {
     udp_packet_t pkt = {
         .magic    = PACKET_MAGIC,
@@ -109,7 +111,33 @@ static void send_mouse_report_raw(uint8_t buttons, int16_t dx, int16_t dy, int8_
     pkt.mouse.dy      = dy;
     pkt.mouse.wheel   = wheel;
     pkt.mouse.pan     = pan;
-    send_udp_packet(&pkt);
+    send_udp_packet_to(&pkt, dest);
+}
+
+void hid_forwarder_send_consumer_to(const struct sockaddr_in *dest, uint16_t usage_id)
+{
+    udp_packet_t pkt = {
+        .magic    = PACKET_MAGIC,
+        .sequence = ++s_seq,
+        .type     = EVENT_TYPE_CONSUMER,
+    };
+    pkt.consumer.usage_id = usage_id;
+    send_udp_packet_to(&pkt, dest);
+}
+
+static void send_keyboard_report_raw(uint8_t modifiers, const uint8_t keycodes[6])
+{
+    hid_forwarder_send_keyboard_to(&s_target_addr, modifiers, keycodes);
+}
+
+static void send_mouse_report_raw(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
+{
+    hid_forwarder_send_mouse_to(&s_target_addr, buttons, dx, dy, wheel, pan);
+}
+
+static void send_consumer_report_raw(uint16_t usage_id)
+{
+    hid_forwarder_send_consumer_to(&s_target_addr, usage_id);
 }
 
 static void compute_merged_keyboard_report(uint8_t *modifiers, uint8_t keycodes[6])
@@ -137,9 +165,11 @@ static void compute_merged_keyboard_report(uint8_t *modifiers, uint8_t keycodes[
 }
 
 // While type-c is connected (usb_device_typec_connected()), every report
-// always goes there; route_rules.h decides whether it *also* gets
-// mirrored over UDP. Otherwise (not connected, or no MAX3421E at all -
-// see main_host.c) everything goes over UDP as before Phase2 - see
+// goes through either the mruby :keyboard pipeline (which owns deciding
+// every sink itself, typec included) or, without mruby, straight to
+// typec plus whatever route_rules.h decides for UDP. Otherwise (not
+// connected, or no MAX3421E/RP2040 bridge at all - see main_host.c)
+// everything goes over UDP as before Phase2 - see
 // mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md.
 static void dispatch_merged_keyboard_report(void)
 {
@@ -148,11 +178,12 @@ static void dispatch_merged_keyboard_report(void)
     compute_merged_keyboard_report(&modifiers, keycodes);
 
     if (usb_device_typec_connected()) {
+        if (mruby_filter_active()) {
+            mruby_dispatch_keyboard(modifiers, keycodes);
+            return;
+        }
         usb_device_typec_keyboard_report(modifiers, keycodes);
-        bool also_udp = mruby_filter_active()
-            ? mruby_route_keyboard_also_udp(modifiers, keycodes)
-            : route_keyboard_also_udp(modifiers, keycodes);
-        if (!also_udp) {
+        if (!route_keyboard_also_udp(modifiers, keycodes)) {
             return;
         }
     }
@@ -173,10 +204,21 @@ void hid_forwarder_keyboard_report(uint8_t modifiers, const uint8_t keycodes_in[
 {
     uint8_t keycodes[6];
     memcpy(keycodes, keycodes_in, 6);
-    bool forward = mruby_filter_active()
-        ? mruby_filter_keyboard_report(&modifiers, keycodes)
-        : filter_keyboard_report(&modifiers, keycodes);
-    if (forward) {
+
+    if (mruby_filter_active()) {
+        // Pipeline model: tracking "what's currently held" is unconditional
+        // and always reflects the true physical state - remapping/dropping
+        // individual keys is a per-sink routing concern handled inside the
+        // :keyboard pipeline's `to` blocks (mruby_dispatch_keyboard(), via
+        // dispatch_merged_keyboard_report() below), not a global forward/
+        // drop gate here anymore. See mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
+        s_kbd_modifiers = modifiers;
+        memcpy(s_kbd_keycodes, keycodes, 6);
+        dispatch_merged_keyboard_report();
+        return;
+    }
+
+    if (filter_keyboard_report(&modifiers, keycodes)) {
         s_kbd_modifiers = modifiers;
         memcpy(s_kbd_keycodes, keycodes, 6);
         dispatch_merged_keyboard_report();
@@ -188,31 +230,29 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
     uint8_t synth_modifiers = 0;
     uint8_t synth_keycode = HID_KEY_NO_PRESS;
 
-    // Split (rough, to be revisited): filter_rules.h now only shapes the
-    // type-c-bound copy; route_rules.h/UDP always see the original raw
-    // values, never the filtered ones. This lets e.g. wheel be dropped
-    // from type-c via filter_rules.h while still reaching the Device-role
-    // board over UDP via route_rules.h - see README.md's filter/conv/route
-    // section.
-    uint8_t f_buttons = buttons;
-    int16_t f_dx = dx, f_dy = dy;
-    int8_t f_wheel = wheel, f_pan = pan;
-    bool use_mruby = mruby_filter_active();
-    bool forward_typec = use_mruby
-        ? mruby_filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
-                                    &synth_modifiers, &synth_keycode)
-        : filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
-                              &synth_modifiers, &synth_keycode);
-
     if (usb_device_typec_connected()) {
-        if (forward_typec) {
-            usb_device_typec_mouse_report(f_buttons, f_dx, f_dy, f_wheel, f_pan);
-        }
-        bool also_udp = use_mruby
-            ? mruby_route_mouse_also_udp(buttons, dx, dy, wheel, pan)
-            : route_mouse_also_udp(buttons, dx, dy, wheel, pan);
-        if (also_udp) {
-            send_mouse_report_raw(buttons, dx, dy, wheel, pan);
+        if (mruby_filter_active()) {
+            // mruby_dispatch_mouse() owns every sink (typec and any named
+            // UDP sinks) via the :mouse pipeline's to/branch stages, and
+            // fills synth_modifiers/synth_keycode via the script's optional
+            // mouse_synth_keys hook (see mds/usb_hid/2026-08-29_mruby_phase1_impl.md).
+            mruby_dispatch_mouse(buttons, dx, dy, wheel, pan, &synth_modifiers, &synth_keycode);
+        } else {
+            // Split (rough, kept for the C fallback path): filter_rules.h
+            // only shapes the type-c-bound copy; route_rules.h/UDP always
+            // see the original raw values, never the filtered ones - see
+            // mds/usb_hid/2026-08-21_filter_conv_route.md.
+            uint8_t f_buttons = buttons;
+            int16_t f_dx = dx, f_dy = dy;
+            int8_t f_wheel = wheel, f_pan = pan;
+            bool forward_typec = filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
+                                                      &synth_modifiers, &synth_keycode);
+            if (forward_typec) {
+                usb_device_typec_mouse_report(f_buttons, f_dx, f_dy, f_wheel, f_pan);
+            }
+            if (route_mouse_also_udp(buttons, dx, dy, wheel, pan)) {
+                send_mouse_report_raw(buttons, dx, dy, wheel, pan);
+            }
         }
     } else {
         send_mouse_report_raw(buttons, dx, dy, wheel, pan);
@@ -223,22 +263,16 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
 void hid_forwarder_consumer(uint16_t usage_id)
 {
     if (usb_device_typec_connected()) {
+        if (mruby_filter_active()) {
+            mruby_dispatch_consumer(usage_id);
+            return;
+        }
         usb_device_typec_consumer_report(usage_id);
-        bool also_udp = mruby_filter_active()
-            ? mruby_route_consumer_also_udp(usage_id)
-            : route_consumer_also_udp(usage_id);
-        if (!also_udp) {
+        if (!route_consumer_also_udp(usage_id)) {
             return;
         }
     }
-
-    udp_packet_t pkt = {
-        .magic    = PACKET_MAGIC,
-        .sequence = ++s_seq,
-        .type     = EVENT_TYPE_CONSUMER,
-    };
-    pkt.consumer.usage_id = usage_id;
-    send_udp_packet(&pkt);
+    send_consumer_report_raw(usage_id);
 }
 
 esp_err_t hid_forwarder_init(void)
