@@ -31,3 +31,19 @@ menu "USB HID Descriptor"
             USB Product ID.
 
 endmenu
+
+menu "mruby filter/route (Host role)"
+
+    config MRUBY_FILTER_ROUTE_ENABLE
+        bool "Use mruby script for filter/conv/route instead of filter_rules.h/route_rules.h"
+        default y
+        help
+            Host role (KVM_ROLE=HOST) only. When enabled, hid_forwarder.c
+            calls into the embedded mruby script (main/mruby_scripts/default.rb)
+            for filter/route decisions instead of the C filter_rules.h/
+            route_rules.h path. If the script fails to load/parse at boot,
+            it automatically falls back to the C path regardless of this
+            setting - this only controls whether mruby is attempted at all.
+            See mds/usb_hid/2026-08-28_mruby_filter_route.md.
+
+endmenu

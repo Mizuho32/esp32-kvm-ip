@@ -1,6 +1,20 @@
 # Target: ESP32-S3
 CONFIG_IDF_TARGET="esp32s3"
 
+# 8MB flash (mds/usb_hid/2026-08-28_mruby_filter_route.md's target
+# hardware) - custom partitions.csv gives the app partition 3MB, well
+# above the default table's 1MB (mruby alone pushes the Host role image
+# past 2MB) with headroom for growth and the Phase2 script-storage
+# partition that design doc's next step will add.
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# 8192 (default 3584): app_main() (task "main") calls mruby_filter_init()
+# on this task, and mruby's VM init + Prism parser overflowed the default
+# stack on real hardware - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
 # USB OTG (ESP32-S3 native USB)
 CONFIG_TINYUSB_HID_COUNT=3
 

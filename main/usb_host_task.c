@@ -545,7 +545,11 @@ esp_err_t usb_host_task_start(void)
     const hid_host_driver_config_t hid_host_driver_config = {
         .create_background_task = true,
         .task_priority           = 5,
-        .stack_size              = 4096,
+        // 8192 (was 4096): this background task's callback calls
+        // hid_forwarder_*(), which when CONFIG_MRUBY_FILTER_ROUTE_ENABLE
+        // is on goes through mrb_funcall_argv() - see
+        // mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
+        .stack_size              = 8192,
         .core_id                 = 0,
         .callback                = hid_host_driver_event_callback,
         .callback_arg            = NULL,

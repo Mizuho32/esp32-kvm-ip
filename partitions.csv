@@ -1,0 +1,19 @@
+# Name,      Type, SubType, Offset,  Size
+# Target hardware: ESP32-S3, 8MB flash (see
+# mds/usb_hid/2026-08-28_mruby_filter_route.md). factory is sized well
+# above the current ~2MB app image (mruby brings Host role over the
+# previous default 1MB factory partition) with headroom for growth.
+#
+# mrb_script: raw (non-filesystem) storage for one uploaded mruby script -
+# a 4-byte little-endian length header followed by the script's UTF-8
+# source, written via bin/upload_mruby_script.py (parttool.py write_partition)
+# over serial without rebuilding/reflashing the app image. Read at boot by
+# main/mruby_filter.c; falls back to the embedded main/mruby_scripts/default.rb
+# if this partition is empty/erased/invalid. Custom subtype 0x50 is in
+# ESP-IDF's user-defined data-subtype range (0x40-0xFE) - see
+# mds/usb_hid/2026-08-29_mruby_phase1_impl.md. Offset left blank so
+# gen_esp32part.py places it right after factory.
+nvs,        data, nvs,     0x9000,  24K,
+phy_init,   data, phy,     0xf000,  4K,
+factory,    app,  factory, 0x10000, 3M,
+mrb_script, data, 0x50,    ,        64K,

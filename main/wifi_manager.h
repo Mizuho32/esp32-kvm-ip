@@ -22,7 +22,12 @@ extern EventGroupHandle_t wifi_event_group;
  *
  * @param hostname Sent to the DHCP server (option 12) and used as the
  *                 netif's mDNS-less hostname, so the device can be found
- *                 by name in the router's DHCP lease list.
+ *                 by name in the router's DHCP lease list. NULL means
+ *                 "don't set" (leave the chip's own default hostname
+ *                 alone) - see main_host.c/mruby_filter.h for the Host
+ *                 role, where this is the mruby script's `hostname` call
+ *                 result rather than a compile-time constant, since one
+ *                 firmware image is meant to run on multiple boards.
  * @return ESP_OK if connected, ESP_FAIL on failure
  */
 esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *hostname);

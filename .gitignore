@@ -18,6 +18,12 @@
 
 # Build artifacts and directories
 **/build/
+
+# mruby build-lockfile, auto-generated next to esp32s3_build_config.rb by
+# rake (records the exact mruby version/release_no built) - not something
+# to track, esp32-kvm-ip/components/mruby/mruby is already the pinned
+# version via the submodule commit.
+components/mruby/*.rb.lock
 build/
 build.*/
 *.o

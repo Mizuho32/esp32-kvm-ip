@@ -800,7 +800,13 @@ esp_err_t usb_host_rp2040_bridge_task_start(void)
         return ESP_ERR_NO_MEM;
     }
 #if !BRIDGE_MINIMAL_TEST
-    if (xTaskCreate(dispatch_task, "usb_host_rp2040disp", 4096, NULL, 5, NULL) != pdPASS) {
+    // 8192 (was 4096): dispatch_task calls hid_forwarder_*(), which when
+    // CONFIG_MRUBY_FILTER_ROUTE_ENABLE is on goes through mrb_funcall_argv()
+    // - mruby's VM dispatch/GC needs more stack than this task's other work
+    // did before. See mds/usb_hid/2026-08-29_mruby_phase1_impl.md (this
+    // task hit the same class of stack-overflow main's own task did during
+    // mruby_filter_init() - see sdkconfig.defaults).
+    if (xTaskCreate(dispatch_task, "usb_host_rp2040disp", 8192, NULL, 5, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
 #endif

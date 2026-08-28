@@ -566,7 +566,11 @@ static void max3421_host_task(void *arg)
 
 esp_err_t usb_host_max3421_task_start(void)
 {
-    if (xTaskCreate(max3421_host_task, "usb_host_max3421", 4096, NULL, 5, &s_max3421_task) != pdPASS) {
+    // 8192 (was 4096): this task calls hid_forwarder_*(), which when
+    // CONFIG_MRUBY_FILTER_ROUTE_ENABLE is on goes through mrb_funcall_argv()
+    // - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md and
+    // usb_host_rp2040_bridge.c's dispatch_task for the same bump.
+    if (xTaskCreate(max3421_host_task, "usb_host_max3421", 8192, NULL, 5, &s_max3421_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;

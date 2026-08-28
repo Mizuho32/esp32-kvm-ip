@@ -34,6 +34,12 @@
 #include "route_rules_default.h"
 #endif
 
+// mruby_filter_active() picks between this file (filter_rules.h/route_rules.h)
+// and an embedded mruby script for every filter/route decision below - see
+// mds/usb_hid/2026-08-28_mruby_filter_route.md. filter_rules.h/route_rules.h
+// stay fully wired up as the always-available C fallback, not dead code.
+#include "mruby_filter.h"
+
 #define TAG "HIDFWD"
 
 static int s_sock = -1;
@@ -143,7 +149,10 @@ static void dispatch_merged_keyboard_report(void)
 
     if (usb_device_typec_connected()) {
         usb_device_typec_keyboard_report(modifiers, keycodes);
-        if (!route_keyboard_also_udp(modifiers, keycodes)) {
+        bool also_udp = mruby_filter_active()
+            ? mruby_route_keyboard_also_udp(modifiers, keycodes)
+            : route_keyboard_also_udp(modifiers, keycodes);
+        if (!also_udp) {
             return;
         }
     }
@@ -164,7 +173,10 @@ void hid_forwarder_keyboard_report(uint8_t modifiers, const uint8_t keycodes_in[
 {
     uint8_t keycodes[6];
     memcpy(keycodes, keycodes_in, 6);
-    if (filter_keyboard_report(&modifiers, keycodes)) {
+    bool forward = mruby_filter_active()
+        ? mruby_filter_keyboard_report(&modifiers, keycodes)
+        : filter_keyboard_report(&modifiers, keycodes);
+    if (forward) {
         s_kbd_modifiers = modifiers;
         memcpy(s_kbd_keycodes, keycodes, 6);
         dispatch_merged_keyboard_report();
@@ -185,14 +197,21 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
     uint8_t f_buttons = buttons;
     int16_t f_dx = dx, f_dy = dy;
     int8_t f_wheel = wheel, f_pan = pan;
-    bool forward_typec = filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
-                                             &synth_modifiers, &synth_keycode);
+    bool use_mruby = mruby_filter_active();
+    bool forward_typec = use_mruby
+        ? mruby_filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
+                                    &synth_modifiers, &synth_keycode)
+        : filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
+                              &synth_modifiers, &synth_keycode);
 
     if (usb_device_typec_connected()) {
         if (forward_typec) {
             usb_device_typec_mouse_report(f_buttons, f_dx, f_dy, f_wheel, f_pan);
         }
-        if (route_mouse_also_udp(buttons, dx, dy, wheel, pan)) {
+        bool also_udp = use_mruby
+            ? mruby_route_mouse_also_udp(buttons, dx, dy, wheel, pan)
+            : route_mouse_also_udp(buttons, dx, dy, wheel, pan);
+        if (also_udp) {
             send_mouse_report_raw(buttons, dx, dy, wheel, pan);
         }
     } else {
@@ -205,7 +224,10 @@ void hid_forwarder_consumer(uint16_t usage_id)
 {
     if (usb_device_typec_connected()) {
         usb_device_typec_consumer_report(usage_id);
-        if (!route_consumer_also_udp(usage_id)) {
+        bool also_udp = mruby_filter_active()
+            ? mruby_route_consumer_also_udp(usage_id)
+            : route_consumer_also_udp(usage_id);
+        if (!also_udp) {
             return;
         }
     }

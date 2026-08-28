@@ -12,6 +12,7 @@
 #include "nvs_flash.h"
 
 #include "hid_forwarder.h"
+#include "mruby_filter.h"
 #include "protocol.h"
 #include "status_led.h"
 #include "usb_device_typec.h"
@@ -49,11 +50,17 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized");
 
+    // Must run before wifi_manager_init() - the script's `hostname "..."`
+    // call (if any) needs to have been evaluated before the netif is set
+    // up. See mds/usb_hid/2026-08-28_mruby_filter_route.md's hostname
+    // section: one firmware image is meant to run on multiple boards now,
+    // so there's no single compile-time hostname constant anymore -
+    // mruby_filter_hostname() returns NULL (leave the chip's own default
+    // hostname alone) unless the loaded script set one.
+    mruby_filter_init();
+
 #if !HOST_MINIMAL_TEST
-    // Distinct from the Device role's WIFI_HOSTNAME (both roles share the
-    // same wifi_credentials.h) so the two boards don't show up under the
-    // same DHCP lease name.
-    esp_err_t wifi_ret = wifi_manager_init(WIFI_SSID, WIFI_PASSWORD, WIFI_HOSTNAME "-host");
+    esp_err_t wifi_ret = wifi_manager_init(WIFI_SSID, WIFI_PASSWORD, mruby_filter_hostname());
     if (wifi_ret != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connection failed (0x%x). Restarting in 5s...", wifi_ret);
         vTaskDelay(pdMS_TO_TICKS(5000));
