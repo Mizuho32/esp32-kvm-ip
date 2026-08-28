@@ -24,8 +24,8 @@
 // main_host.c) - this is no longer meant to coexist with a wired-up
 // MAX3421E on the same board.
 #define BRIDGE_UART_PORT  UART_NUM_1
-#define BRIDGE_UART_TX_PIN 5
-#define BRIDGE_UART_RX_PIN 6
+#define BRIDGE_UART_TX_PIN 9
+#define BRIDGE_UART_RX_PIN 8
 #define BRIDGE_UART_BAUD  460800
 
 // Frame format (see mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md):
