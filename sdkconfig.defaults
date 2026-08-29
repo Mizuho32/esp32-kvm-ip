@@ -10,10 +10,20 @@ CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# 8192 (default 3584): app_main() (task "main") calls mruby_filter_init()
-# on this task, and mruby's VM init + Prism parser overflowed the default
-# stack on real hardware - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# 16384 (default 3584, previously bumped to 8192): app_main() (task
+# "main") calls mruby_filter_init() on this task, and mruby's VM init +
+# Prism parser overflowed the default stack on real hardware - see
+# mds/usb_hid/2026-08-29_mruby_phase1_impl.md. 8192 was enough for that
+# alone, but overflowed again once mruby_webui_start() (Phase 2,
+# mds/usb_hid/2026-08-30_mruby_phase2_webui.md) - which also runs on
+# this task and calls esp_http_server's httpd_start() - was added later
+# in the same app_main() sequence. The overflow backtrace itself doesn't
+# show the actual offending call site (ESP-IDF's stack-overflow
+# detection unwinds the context-switch/panic path, not the corrupted
+# task's own frames), so this is sized with headroom rather than tuned
+# to an exact measurement. Only costs memory transiently during boot -
+# task "main"'s stack is freed once app_main() returns.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # USB OTG (ESP32-S3 native USB)
 CONFIG_TINYUSB_HID_COUNT=3
