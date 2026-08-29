@@ -257,6 +257,33 @@ static mrb_value dsl_usb_host_backends(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `debug_print(*args)` - the only output a script has, since the
+// gembox (components/mruby/esp32s3_build_config.rb) doesn't include
+// mruby-print (no puts/print/p). Each arg is #inspect'd (so Hash/Array/
+// nil/etc. show their contents, not just to_s) and logged via ESP_LOGI -
+// visible in the same `idf.py monitor` console already used for
+// everything else. Deliberately does not touch WebSocket/network output:
+// that would need its own connection lifecycle handling and risks
+// blocking the latency-sensitive mouse dispatch path this is often
+// called from (mds/usb_hid/2026-08-28_mruby_filter_route.md's "一番の
+// リスク" section) - only call this for state changes, not every
+// mouse/keyboard report, or logging itself becomes the bottleneck.
+static mrb_value dsl_debug_print(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    const mrb_value *argv;
+    mrb_int argc;
+    mrb_get_args(mrb, "*", &argv, &argc);
+
+    for (mrb_int i = 0; i < argc; i++) {
+        mrb_value s = mrb_funcall(mrb, argv[i], "inspect", 0);
+        if (mrb_type(s) == MRB_TT_STRING) {
+            ESP_LOGI(TAG, "script: %s", RSTRING_PTR(s));
+        }
+    }
+    return mrb_nil_value();
+}
+
 static sink_def_t *find_sink(mrb_state *mrb, mrb_sym name)
 {
     for (int i = 0; i < s_sink_count; i++) {
@@ -586,6 +613,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "to",       dsl_to,       MRB_ARGS_REST() | MRB_ARGS_BLOCK());
     mrb_define_method(mrb, k, "branch",   dsl_branch,   MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
     mrb_define_method(mrb, k, "usb_host_backends", dsl_usb_host_backends, MRB_ARGS_REST());
+    mrb_define_method(mrb, k, "debug_print", dsl_debug_print, MRB_ARGS_REST());
 }
 
 void mruby_filter_init(void)
