@@ -8,13 +8,15 @@
 // replacing filter_rules.h/route_rules.h - see
 // mds/usb_hid/2026-08-28_mruby_filter_route.md (design) and
 // mds/usb_hid/2026-08-29_mruby_phase1_impl.md (what's actually built,
-// including where this DSL implementation deliberately simplifies or
-// defers parts of the original design sketch - event objects are Hashes
-// with symbol keys rather than dot-accessor objects, mouse-triggered
-// synthetic keyboard keys are a separate optional `mouse_synth_keys`
-// hook rather than a `to` block output, and `:udp` as a *source* - i.e.
-// merging the Device role into this same pipeline engine - is not
-// implemented).
+// including where this DSL implementation deliberately simplifies the
+// original design sketch - event objects are Hashes with symbol keys
+// rather than dot-accessor objects, and mouse-triggered synthetic
+// keyboard keys are a separate optional `mouse_synth_keys` hook rather
+// than a `to` block output). `:udp` sources are implemented (a script
+// declares one with `source :name, :udp, listen: PORT`), as is script
+// control over which physical USB Host backend(s) main_host.c tries via
+// `usb_host_backends(*syms)` - see mruby_filter_host_backend_count()/_at()
+// below.
 //
 // hid_forwarder.c calls mruby_filter_active() once per report to decide
 // whether to use these functions or fall back to the C
@@ -59,5 +61,43 @@ const char *mruby_filter_hostname(void);
 // "assert failed: tcpip_send_msg_wait_sem ... Invalid mbox" - see
 // mds/usb_hid/2026-08-29_mruby_phase1_impl.md. A no-op if mruby isn't active.
 void mruby_filter_resolve_udp_sinks(void);
+
+// Starts the `source :name, :udp, listen: PORT` receive task, if the
+// loaded script declared one (no-op otherwise, or if mruby isn't active).
+// Same WiFi-must-be-up ordering constraint as mruby_filter_resolve_udp_sinks()
+// - call it right alongside that, after wifi_manager_init() succeeds.
+// Received HID events are dispatched through a *separate* set of
+// kind-indexed pipelines from local (:usb_host-sourced) ones - a script
+// distinguishes them via `from :net_in, kind: :mouse` (required for :udp
+// sources, since unlike a physical mouse this source carries any kind)
+// vs. plain `from :local_mouse` for local input. See
+// mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
+void mruby_filter_start_net_source(void);
+
+// Which physical USB Host backend(s) main_host.c should try, and in what
+// order - fully controlled by the script's `usb_host_backends(*syms)`
+// call (e.g. `usb_host_backends :rp2040_bridge, :max3421` to exclude
+// native OTG, freeing it for type-c device output). If the script never
+// calls it, this defaults to [:rp2040_bridge, :max3421] when a `:udp`
+// source is declared (that board has no use for native-OTG-as-host, and
+// needs type-c actually started for its network-sourced pipelines'
+// :typec sinks to work) or [:rp2040_bridge, :max3421, :native_otg]
+// otherwise (today's original hardcoded order). main_host.c tries each
+// in turn, stopping at the first one that actually starts; if none do
+// (empty list, or the list is exhausted without a :native_otg entry),
+// native OTG is left free for type-c device output. If mruby isn't
+// active at all (VM failed to open, or both the uploaded script and the
+// embedded default.rb failed to parse), count() is 0 and main_host.c
+// instead runs its original, fully hardcoded pure-C probe order
+// unconditionally - this is the "fall back to pure C" mruby init-failure
+// path. See mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
+typedef enum {
+    MRUBY_HOST_BACKEND_RP2040_BRIDGE,
+    MRUBY_HOST_BACKEND_MAX3421,
+    MRUBY_HOST_BACKEND_NATIVE_OTG,
+} mruby_host_backend_t;
+
+int mruby_filter_host_backend_count(void);
+mruby_host_backend_t mruby_filter_host_backend_at(int index);
 
 #endif

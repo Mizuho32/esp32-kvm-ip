@@ -35,6 +35,50 @@
 // subsystems themselves rather than just their logging.
 #define HOST_MINIMAL_TEST 0
 
+// Each returns true if that backend was actually detected/started (and
+// hard-restarts on a detected-but-failed-to-start error, same as before -
+// these are just the probe+start pairs factored out so both the
+// script-driven loop and the pure-C fallback below can share them
+// without duplicating the restart-on-failure logic). See
+// mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
+static bool try_rp2040_bridge(void)
+{
+    if (!usb_host_rp2040_bridge_probe()) {
+        return false;
+    }
+    ESP_LOGI(TAG, "RP2040 bridge detected - using UART USB Host backend");
+    if (usb_host_rp2040_bridge_task_start() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start RP2040 bridge task. Restarting in 5s...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_restart();
+    }
+    return true;
+}
+
+static bool try_max3421(void)
+{
+    if (!usb_host_max3421_probe()) {
+        return false;
+    }
+    ESP_LOGI(TAG, "MAX3421E detected - using SPI USB Host backend");
+    if (usb_host_max3421_task_start() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start MAX3421 USB host task. Restarting in 5s...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_restart();
+    }
+    return true;
+}
+
+static void start_native_otg_host(void)
+{
+    ESP_LOGI(TAG, "Using native OTG USB Host backend");
+    if (usb_host_task_start() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start USB host task. Restarting in 5s...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_restart();
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "ESP32-S3 KVM (Host role) starting...");
@@ -71,9 +115,10 @@ void app_main(void)
     ESP_LOGI(TAG, "WiFi power save disabled");
 
     // Must run after wifi_manager_init() (lwIP's TCP/IP thread needs to
-    // be up for getaddrinfo() to work) - see mruby_filter.h and
-    // mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
+    // be up for getaddrinfo()/socket()/bind() to work) - see
+    // mruby_filter.h and mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
     mruby_filter_resolve_udp_sinks();
+    mruby_filter_start_net_source();
 
     if (hid_forwarder_init() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init HID forwarder (UDP socket). Restarting in 5s...");
@@ -87,37 +132,56 @@ void app_main(void)
     // Exactly one Host backend runs, never more than one - see
     // usb_host_max3421.h, usb_host_rp2040_bridge.h and
     // mds/usb_hid/2026-08-23_filter_conv_router_with_max3421.md /
-    // mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md. RP2040 bridge is
-    // tried first (currently the preferred backend - see the RP2040 doc
-    // for why), then MAX3421E, then native OTG as the last-resort
-    // fallback. Whichever of the first two backends is used, native OTG
-    // is deliberately left unused so it's free for the USB Device
-    // (type-c) output path (Phase2); native OTG fallback can't offer
-    // that (it's already busy being the Host input). All backends funnel
-    // into the same hid_forwarder.c pipeline either way.
+    // mds/usb_hid/2026-08-23_rp2040_as_host_bridge_plan.md. All backends
+    // funnel into the same hid_forwarder.c pipeline either way.
+    //
+    // Which backend(s) to try, and in what order, is controlled entirely
+    // by the loaded mruby script (`usb_host_backends(*syms)` - see
+    // mruby_filter.h and mds/usb_hid/2026-08-29_mruby_phase1_impl.md) so
+    // a board that only wants network (:udp source) input, for example,
+    // can leave native OTG free for type-c device output instead of
+    // claiming it as a (useless to it) local USB Host input backend.
+    // If mruby isn't active at all (VM failed to open, or both the
+    // uploaded script and the embedded default.rb failed to parse),
+    // mruby_filter_host_backend_count() is 0 and this falls back to the
+    // original, fully hardcoded probe order (RP2040 bridge, then
+    // MAX3421E, then native OTG) unconditionally - the "fall back to
+    // pure C" path.
     bool typec_capable = false;
-    if (usb_host_rp2040_bridge_probe()) {
-        ESP_LOGI(TAG, "RP2040 bridge detected - using UART USB Host backend");
-        if (usb_host_rp2040_bridge_task_start() != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start RP2040 bridge task. Restarting in 5s...");
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            esp_restart();
+    int backend_count = mruby_filter_host_backend_count();
+    if (backend_count > 0) {
+        bool started = false;
+        for (int i = 0; i < backend_count && !started; i++) {
+            switch (mruby_filter_host_backend_at(i)) {
+            case MRUBY_HOST_BACKEND_RP2040_BRIDGE:
+                if (try_rp2040_bridge()) {
+                    typec_capable = true;
+                    started = true;
+                }
+                break;
+            case MRUBY_HOST_BACKEND_MAX3421:
+                if (try_max3421()) {
+                    typec_capable = true;
+                    started = true;
+                }
+                break;
+            case MRUBY_HOST_BACKEND_NATIVE_OTG:
+                start_native_otg_host();
+                started = true; // typec_capable stays false - native OTG is claimed for host input
+                break;
+            }
         }
-        typec_capable = true;
-    } else if (usb_host_max3421_probe()) {
-        ESP_LOGI(TAG, "MAX3421E detected - using SPI USB Host backend");
-        if (usb_host_max3421_task_start() != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start MAX3421 USB host task. Restarting in 5s...");
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            esp_restart();
+        if (!started) {
+            ESP_LOGI(TAG, "No USB Host backend detected/configured - native OTG free for type-c device output only");
+            typec_capable = true;
         }
-        typec_capable = true;
     } else {
-        ESP_LOGI(TAG, "No RP2040 bridge or MAX3421E detected - using native OTG USB Host backend");
-        if (usb_host_task_start() != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start USB host task. Restarting in 5s...");
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            esp_restart();
+        if (try_rp2040_bridge()) {
+            typec_capable = true;
+        } else if (try_max3421()) {
+            typec_capable = true;
+        } else {
+            start_native_otg_host();
         }
     }
 

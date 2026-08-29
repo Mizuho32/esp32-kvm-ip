@@ -1,11 +1,16 @@
 #include "mruby_filter.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_partition.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
@@ -17,6 +22,7 @@
 #include "mruby/string.h"
 
 #include "hid_forwarder.h"
+#include "protocol.h"
 #include "usb_device_typec.h"
 
 #define TAG "MRBFILT"
@@ -39,7 +45,9 @@ extern const uint8_t mruby_default_script_end[]   asm("_binary_default_rb_end");
 // See mds/usb_hid/2026-08-28_mruby_filter_route.md's "3. Src/Sinkの抽象化"
 // section for the design, and mds/usb_hid/2026-08-29_mruby_phase1_impl.md
 // for what this implementation deliberately simplifies (Hash-based event
-// objects, mouse_synth_keys as a separate hook, no :udp source).
+// objects, mouse_synth_keys as a separate hook, and how `:udp` sources -
+// which unlike `:usb_host` carry any kind, decided per from()'s kind:
+// option - are dispatched through a parallel set of pipelines).
 //
 // Everything below is resolved exactly once, while the script's top-level
 // source/sink/pipeline/from/to/branch calls execute during mrb_load_nstring()
@@ -83,24 +91,62 @@ typedef struct {
     int branch_count;
 } pipeline_t;
 
+typedef enum { SRC_USB_HOST, SRC_UDP } source_type_t;
+
 typedef struct {
     mrb_sym name;
-    int kind; // PIPE_*
+    source_type_t type;
+    int kind;        // PIPE_* - fixed at declare time for SRC_USB_HOST; unused for SRC_UDP (a :udp source carries any kind, decided per from()'s kind: opt - see dsl_from())
+    int listen_port;  // SRC_UDP only
 } source_def_t;
 
 static sink_def_t s_sinks[MRB_DSL_MAX_SINKS];
 static int s_sink_count;
 static source_def_t s_sources[MRB_DSL_MAX_SINKS];
 static int s_source_count;
+
+// Local (:usb_host-sourced) and network (:udp-sourced) pipelines are kept
+// in separate kind-indexed arrays - see mruby_dispatch_keyboard/mouse/consumer()
+// (local, called from hid_forwarder.c) vs. mruby_dispatch_net_keyboard/mouse/consumer()
+// (network, called from net_source_task() below). A :udp source has no
+// fixed kind of its own (unlike :usb_host - a physical mouse only ever
+// produces mouse events), so which of the 3 net pipelines a `from :net_in,
+// kind: :mouse` targets is decided by from()'s kind: option instead of by
+// the source itself.
 static pipeline_t s_pipelines[PIPE_KIND_COUNT];
+static pipeline_t s_net_pipelines[PIPE_KIND_COUNT];
 
 // Set by from() while inside a pipeline {...} block; to()/branch() append
-// to s_pipelines[s_building_kind] while this is true. Pipelines never
-// nest, so no stack is needed - see dsl_pipeline().
+// to s_pipelines[s_building_kind] (or s_net_pipelines[], if s_building_net)
+// while this is true. Pipelines never nest, so no stack is needed - see
+// dsl_pipeline().
 static bool s_building;
+static bool s_building_net;
 static int s_building_kind;
 
+// At most one :udp source (one listen port) is supported - see dsl_source().
+static bool s_net_source_declared;
+static int s_net_source_port;
+static TaskHandle_t s_net_source_task;
+
+// `usb_host_backends(*syms)` - see mruby_filter.h. -1 = not explicitly
+// configured by the script; resolved to a default in mruby_filter_init()
+// once the whole script has loaded (so s_net_source_declared is final).
+#define MAX_HOST_BACKENDS 3
+static mruby_host_backend_t s_host_backends[MAX_HOST_BACKENDS];
+static int s_host_backend_count = -1;
+static bool s_host_backends_explicit;
+
 static mrb_state *s_mrb;
+// mrb_state isn't thread-safe - once net_source_task() exists, a script
+// with both local (:usb_host-sourced) pipelines and a :udp source can
+// have dispatch_task/bridge_task (local input) and net_source_task
+// (network input) call into the same VM from two different FreeRTOS
+// tasks concurrently. Every mruby_dispatch_*()/mruby_dispatch_net_*()
+// call takes this for its whole body - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md
+// (this was found from a real "checksum mismatch"/heap-corruption-looking
+// regression once a script exercised both paths at once).
+static SemaphoreHandle_t s_mrb_mutex;
 static bool s_active;
 static char s_hostname[64];
 static bool s_hostname_set;
@@ -109,9 +155,15 @@ static void reset_dsl_state(void)
 {
     s_sink_count = 0;
     s_source_count = 0;
-    memset(s_pipelines, 0, sizeof(s_pipelines)); // only zeroes to_count/branch_count meaningfully - see reset_dsl_state()'s call sites
+    memset(s_pipelines, 0, sizeof(s_pipelines));     // only zeroes to_count/branch_count meaningfully - see reset_dsl_state()'s call sites
+    memset(s_net_pipelines, 0, sizeof(s_net_pipelines));
     s_building = false;
+    s_building_net = false;
     s_building_kind = 0;
+    s_net_source_declared = false;
+    s_net_source_port = -1;
+    s_host_backend_count = -1;
+    s_host_backends_explicit = false;
     s_hostname_set = false;
 }
 
@@ -170,6 +222,41 @@ static int kind_from_symbol_value(mrb_state *mrb, mrb_value v, const char *what)
     return -1; // unreachable, mrb_raisef() is mrb_noreturn
 }
 
+static mruby_host_backend_t host_backend_from_symbol(mrb_state *mrb, mrb_value v)
+{
+    if (mrb_type(v) != MRB_TT_SYMBOL) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "usb_host_backends: arguments must be symbols");
+    }
+    const char *name = mrb_sym_name(mrb, mrb_symbol(v));
+    if (strcmp(name, "rp2040_bridge") == 0) return MRUBY_HOST_BACKEND_RP2040_BRIDGE;
+    if (strcmp(name, "max3421") == 0) return MRUBY_HOST_BACKEND_MAX3421;
+    if (strcmp(name, "native_otg") == 0) return MRUBY_HOST_BACKEND_NATIVE_OTG;
+    mrb_raisef(mrb, E_ARGUMENT_ERROR,
+               "usb_host_backends: unknown backend :%s (expected :rp2040_bridge/:max3421/:native_otg)", name);
+    return MRUBY_HOST_BACKEND_RP2040_BRIDGE; // unreachable
+}
+
+// `usb_host_backends :rp2040_bridge, :max3421, :native_otg` - order = try
+// order, main_host.c stops at the first that actually starts. Omitting a
+// backend disables it entirely; omitting :native_otg frees it for type-c
+// device output instead of USB Host input. See mruby_filter.h.
+static mrb_value dsl_usb_host_backends(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    const mrb_value *argv;
+    mrb_int argc;
+    mrb_get_args(mrb, "*", &argv, &argc);
+    if (argc > MAX_HOST_BACKENDS) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "usb_host_backends: too many backends listed");
+    }
+    for (mrb_int i = 0; i < argc; i++) {
+        s_host_backends[i] = host_backend_from_symbol(mrb, argv[i]);
+    }
+    s_host_backend_count = (int)argc;
+    s_host_backends_explicit = true;
+    return mrb_nil_value();
+}
+
 static sink_def_t *find_sink(mrb_state *mrb, mrb_sym name)
 {
     for (int i = 0; i < s_sink_count; i++) {
@@ -190,18 +277,36 @@ static mrb_value dsl_source(mrb_state *mrb, mrb_value self)
     mrb_value opts = mrb_nil_value();
     mrb_get_args(mrb, "nn|H", &name, &type, &opts);
 
-    if (strcmp(mrb_sym_name(mrb, type), "usb_host") != 0) {
-        mrb_raisef(mrb, E_ARGUMENT_ERROR,
-                   "source: unsupported type :%s (only :usb_host is implemented - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md)",
-                   mrb_sym_name(mrb, type));
-    }
-    int kind = kind_from_symbol_value(mrb, dsl_opt(mrb, opts, "kind"), "source");
-
     if (s_source_count >= MRB_DSL_MAX_SINKS) {
         mrb_raise(mrb, E_ARGUMENT_ERROR, "source: too many sources declared");
     }
-    s_sources[s_source_count].name = name;
-    s_sources[s_source_count].kind = kind;
+    source_def_t *src = &s_sources[s_source_count];
+    src->name = name;
+
+    const char *type_name = mrb_sym_name(mrb, type);
+    if (strcmp(type_name, "usb_host") == 0) {
+        src->type = SRC_USB_HOST;
+        src->kind = kind_from_symbol_value(mrb, dsl_opt(mrb, opts, "kind"), "source");
+    } else if (strcmp(type_name, "udp") == 0) {
+        mrb_value listen_v = dsl_opt(mrb, opts, "listen");
+        if (mrb_nil_p(listen_v)) {
+            mrb_raise(mrb, E_ARGUMENT_ERROR, "source: :udp requires listen: (Integer port)");
+        }
+        // Only one listen port is supported (one board, one socket) - see
+        // net_source_task()/mruby_filter_start_net_source().
+        if (s_net_source_declared) {
+            mrb_raise(mrb, E_ARGUMENT_ERROR, "source: only one :udp source is supported (multiple `source ..., :udp` calls)");
+        }
+        src->type = SRC_UDP;
+        src->listen_port = (int)mrb_fixnum(listen_v);
+        s_net_source_declared = true;
+        s_net_source_port = src->listen_port;
+    } else {
+        mrb_raisef(mrb, E_ARGUMENT_ERROR,
+                   "source: unsupported type :%s (only :usb_host/:udp are implemented - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md)",
+                   type_name);
+    }
+
     s_source_count++;
     return mrb_nil_value();
 }
@@ -262,14 +367,29 @@ static mrb_value dsl_from(mrb_state *mrb, mrb_value self)
 {
     (void)self;
     mrb_sym name;
-    mrb_get_args(mrb, "n", &name);
+    mrb_value opts = mrb_nil_value();
+    mrb_get_args(mrb, "n|H", &name, &opts);
 
     for (int i = 0; i < s_source_count; i++) {
-        if (s_sources[i].name == name) {
-            s_building = true;
-            s_building_kind = s_sources[i].kind;
-            return mrb_nil_value();
+        if (s_sources[i].name != name) {
+            continue;
         }
+        source_def_t *src = &s_sources[i];
+        s_building = true;
+        if (src->type == SRC_USB_HOST) {
+            s_building_net = false;
+            s_building_kind = src->kind;
+        } else { // SRC_UDP - no fixed kind of its own, from() must say which
+            mrb_value kind_v = dsl_opt(mrb, opts, "kind");
+            if (mrb_nil_p(kind_v)) {
+                mrb_raisef(mrb, E_ARGUMENT_ERROR,
+                           "from: :udp source :%s requires kind: (it carries any kind - a separate pipeline per kind picks which)",
+                           mrb_sym_name(mrb, name));
+            }
+            s_building_net = true;
+            s_building_kind = kind_from_symbol_value(mrb, kind_v, "from");
+        }
+        return mrb_nil_value();
     }
     mrb_raisef(mrb, E_ARGUMENT_ERROR, "from: unknown source :%s (not declared with source(...))", mrb_sym_name(mrb, name));
     return mrb_nil_value(); // unreachable
@@ -286,7 +406,7 @@ static mrb_value dsl_to(mrb_state *mrb, mrb_value self)
     mrb_value blk = mrb_nil_value();
     mrb_get_args(mrb, "*&", &names, &name_count, &blk);
 
-    pipeline_t *p = &s_pipelines[s_building_kind];
+    pipeline_t *p = s_building_net ? &s_net_pipelines[s_building_kind] : &s_pipelines[s_building_kind];
     if (!mrb_nil_p(blk)) {
         mrb_gc_register(mrb, blk); // must survive indefinitely - see mruby_dispatch_*() below
     }
@@ -318,7 +438,7 @@ static mrb_value dsl_branch(mrb_state *mrb, mrb_value self)
     mrb_value blk;
     mrb_get_args(mrb, "n&!", &name, &blk);
 
-    pipeline_t *p = &s_pipelines[s_building_kind];
+    pipeline_t *p = s_building_net ? &s_net_pipelines[s_building_kind] : &s_pipelines[s_building_kind];
     if (p->branch_count >= MRB_DSL_MAX_STAGES) {
         mrb_raise(mrb, E_ARGUMENT_ERROR, "branch: too many stages in this pipeline");
     }
@@ -350,6 +470,7 @@ static mrb_value dsl_pipeline(mrb_state *mrb, mrb_value self)
         mrb_raisef(mrb, E_ARGUMENT_ERROR, "pipeline :%s: block never called from(...)", mrb_sym_name(mrb, name));
     }
     s_building = false;
+    s_building_net = false;
     return mrb_nil_value();
 }
 
@@ -430,9 +551,10 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
-    mrb_define_method(mrb, k, "from",     dsl_from,     MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "from",     dsl_from,     MRB_ARGS_ARG(1, 1));
     mrb_define_method(mrb, k, "to",       dsl_to,       MRB_ARGS_REST() | MRB_ARGS_BLOCK());
     mrb_define_method(mrb, k, "branch",   dsl_branch,   MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
+    mrb_define_method(mrb, k, "usb_host_backends", dsl_usb_host_backends, MRB_ARGS_REST());
 }
 
 void mruby_filter_init(void)
@@ -444,6 +566,13 @@ void mruby_filter_init(void)
     s_mrb = mrb_open();
     if (s_mrb == NULL) {
         ESP_LOGE(TAG, "mrb_open() failed, falling back to C filter_rules.h/route_rules.h");
+        return;
+    }
+    s_mrb_mutex = xSemaphoreCreateMutex();
+    if (s_mrb_mutex == NULL) {
+        ESP_LOGE(TAG, "xSemaphoreCreateMutex() failed, falling back to C filter_rules.h/route_rules.h");
+        mrb_close(s_mrb);
+        s_mrb = NULL;
         return;
     }
     define_dsl_methods(s_mrb);
@@ -471,6 +600,23 @@ void mruby_filter_init(void)
         ESP_LOGI(TAG, "Loaded embedded default.rb (no mrb_script uploaded)");
     }
 
+    if (!s_host_backends_explicit) {
+        // Script didn't call usb_host_backends() - a :udp source means
+        // this board relies on network-received input, so it has no use
+        // for native-OTG-as-host and needs type-c actually started for
+        // its :udp-sourced pipelines' :typec sinks to work. Otherwise,
+        // default to the original hardcoded probe order. See
+        // mruby_filter.h.
+        s_host_backends[0] = MRUBY_HOST_BACKEND_RP2040_BRIDGE;
+        s_host_backends[1] = MRUBY_HOST_BACKEND_MAX3421;
+        if (s_net_source_declared) {
+            s_host_backend_count = 2;
+        } else {
+            s_host_backends[2] = MRUBY_HOST_BACKEND_NATIVE_OTG;
+            s_host_backend_count = 3;
+        }
+    }
+
     s_active = true;
     ESP_LOGI(TAG, "mruby VM active (hostname %s)", s_hostname_set ? s_hostname : "not set by script");
 #endif
@@ -479,6 +625,16 @@ void mruby_filter_init(void)
 bool mruby_filter_active(void)
 {
     return s_active;
+}
+
+int mruby_filter_host_backend_count(void)
+{
+    return s_active ? s_host_backend_count : 0;
+}
+
+mruby_host_backend_t mruby_filter_host_backend_at(int index)
+{
+    return s_host_backends[index];
 }
 
 const char *mruby_filter_hostname(void)
@@ -554,10 +710,9 @@ static void send_keyboard_to_sink(sink_def_t *sink, uint8_t modifiers, const uin
     }
 }
 
-void mruby_dispatch_keyboard(uint8_t modifiers, const uint8_t keycodes[6])
+static void dispatch_keyboard_via(pipeline_t *p, uint8_t modifiers, const uint8_t keycodes[6])
 {
     int ai = mrb_gc_arena_save(s_mrb);
-    pipeline_t *p = &s_pipelines[PIPE_KEYBOARD];
 
     for (int i = 0; i < p->to_count; i++) {
         to_stage_t *stage = &p->to[i];
@@ -587,6 +742,22 @@ void mruby_dispatch_keyboard(uint8_t modifiers, const uint8_t keycodes[6])
     mrb_gc_arena_restore(s_mrb, ai);
 }
 
+// Local (:usb_host-sourced) keyboard report - called from hid_forwarder.c.
+void mruby_dispatch_keyboard(uint8_t modifiers, const uint8_t keycodes[6])
+{
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+    dispatch_keyboard_via(&s_pipelines[PIPE_KEYBOARD], modifiers, keycodes);
+    xSemaphoreGive(s_mrb_mutex);
+}
+
+// Network (:udp-sourced) keyboard report - called from net_source_task() below.
+static void mruby_dispatch_net_keyboard(uint8_t modifiers, const uint8_t keycodes[6])
+{
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+    dispatch_keyboard_via(&s_net_pipelines[PIPE_KEYBOARD], modifiers, keycodes);
+    xSemaphoreGive(s_mrb_mutex);
+}
+
 static mrb_value build_mouse_event(mrb_state *mrb, uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
 {
     mrb_value h = mrb_hash_new_capa(mrb, 5);
@@ -607,31 +778,10 @@ static void send_mouse_to_sink(sink_def_t *sink, uint8_t buttons, int16_t dx, in
     }
 }
 
-void mruby_dispatch_mouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan,
-                          uint8_t *synth_modifiers, uint8_t *synth_keycode)
+static void dispatch_mouse_via(pipeline_t *p, uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
 {
-    *synth_modifiers = 0;
-    *synth_keycode   = 0; // HID_KEY_NO_PRESS == 0, see hid_usage_keyboard.h
-
     int ai = mrb_gc_arena_save(s_mrb);
 
-    // Optional top-level hook, independent of sink routing - see
-    // mruby_filter.h and mds/usb_hid/2026-08-29_mruby_phase1_impl.md for
-    // why this isn't folded into a `to` block.
-    if (mrb_respond_to(s_mrb, mrb_top_self(s_mrb), mrb_intern_cstr(s_mrb, "mouse_synth_keys"))) {
-        mrb_value args[5] = {
-            mrb_fixnum_value(buttons), mrb_fixnum_value(dx), mrb_fixnum_value(dy),
-            mrb_fixnum_value(wheel), mrb_fixnum_value(pan),
-        };
-        mrb_value ret = mrb_funcall_argv(s_mrb, mrb_top_self(s_mrb),
-                                          mrb_intern_cstr(s_mrb, "mouse_synth_keys"), 5, args);
-        if (!check_error() && mrb_type(ret) == MRB_TT_ARRAY && RARRAY_LEN(ret) == 2) {
-            *synth_modifiers = (uint8_t)mrb_fixnum(mrb_ary_ref(s_mrb, ret, 0));
-            *synth_keycode   = (uint8_t)mrb_fixnum(mrb_ary_ref(s_mrb, ret, 1));
-        }
-    }
-
-    pipeline_t *p = &s_pipelines[PIPE_MOUSE];
     for (int i = 0; i < p->to_count; i++) {
         to_stage_t *stage = &p->to[i];
         if (mrb_nil_p(stage->block)) {
@@ -662,6 +812,49 @@ void mruby_dispatch_mouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel,
     mrb_gc_arena_restore(s_mrb, ai);
 }
 
+// Local (:usb_host-sourced) mouse sample - called from hid_forwarder.c.
+// Also runs the script's optional mouse_synth_keys hook - see
+// mruby_filter.h. Network-sourced mouse samples
+// (mruby_dispatch_net_mouse() below) deliberately skip this: a
+// network-received sample already went through whatever synth-key logic
+// the *sending* board's own pipeline applied, so re-deriving synth keys
+// here from a remote board's raw buttons would be redundant/wrong.
+void mruby_dispatch_mouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan,
+                          uint8_t *synth_modifiers, uint8_t *synth_keycode)
+{
+    *synth_modifiers = 0;
+    *synth_keycode   = 0; // HID_KEY_NO_PRESS == 0, see hid_usage_keyboard.h
+
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+
+    int ai = mrb_gc_arena_save(s_mrb);
+    if (mrb_respond_to(s_mrb, mrb_top_self(s_mrb), mrb_intern_cstr(s_mrb, "mouse_synth_keys"))) {
+        mrb_value args[5] = {
+            mrb_fixnum_value(buttons), mrb_fixnum_value(dx), mrb_fixnum_value(dy),
+            mrb_fixnum_value(wheel), mrb_fixnum_value(pan),
+        };
+        mrb_value ret = mrb_funcall_argv(s_mrb, mrb_top_self(s_mrb),
+                                          mrb_intern_cstr(s_mrb, "mouse_synth_keys"), 5, args);
+        if (!check_error() && mrb_type(ret) == MRB_TT_ARRAY && RARRAY_LEN(ret) == 2) {
+            *synth_modifiers = (uint8_t)mrb_fixnum(mrb_ary_ref(s_mrb, ret, 0));
+            *synth_keycode   = (uint8_t)mrb_fixnum(mrb_ary_ref(s_mrb, ret, 1));
+        }
+    }
+    mrb_gc_arena_restore(s_mrb, ai);
+
+    dispatch_mouse_via(&s_pipelines[PIPE_MOUSE], buttons, dx, dy, wheel, pan);
+
+    xSemaphoreGive(s_mrb_mutex);
+}
+
+// Network (:udp-sourced) mouse sample - called from net_source_task() below.
+static void mruby_dispatch_net_mouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
+{
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+    dispatch_mouse_via(&s_net_pipelines[PIPE_MOUSE], buttons, dx, dy, wheel, pan);
+    xSemaphoreGive(s_mrb_mutex);
+}
+
 static mrb_value build_consumer_event(mrb_state *mrb, uint16_t usage_id)
 {
     mrb_value h = mrb_hash_new_capa(mrb, 1);
@@ -678,10 +871,9 @@ static void send_consumer_to_sink(sink_def_t *sink, uint16_t usage_id)
     }
 }
 
-void mruby_dispatch_consumer(uint16_t usage_id)
+static void dispatch_consumer_via(pipeline_t *p, uint16_t usage_id)
 {
     int ai = mrb_gc_arena_save(s_mrb);
-    pipeline_t *p = &s_pipelines[PIPE_CONSUMER];
 
     for (int i = 0; i < p->to_count; i++) {
         to_stage_t *stage = &p->to[i];
@@ -707,4 +899,84 @@ void mruby_dispatch_consumer(uint16_t usage_id)
     }
 
     mrb_gc_arena_restore(s_mrb, ai);
+}
+
+// Local (:usb_host-sourced) consumer report - called from hid_forwarder.c.
+void mruby_dispatch_consumer(uint16_t usage_id)
+{
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+    dispatch_consumer_via(&s_pipelines[PIPE_CONSUMER], usage_id);
+    xSemaphoreGive(s_mrb_mutex);
+}
+
+// Network (:udp-sourced) consumer report - called from net_source_task() below.
+static void mruby_dispatch_net_consumer(uint16_t usage_id)
+{
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+    dispatch_consumer_via(&s_net_pipelines[PIPE_CONSUMER], usage_id);
+    xSemaphoreGive(s_mrb_mutex);
+}
+
+// ---- network source (:udp) --------------------------------------------
+
+static void net_source_task(void *arg)
+{
+    (void)arg;
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "net source: socket() failed: errno %d", errno);
+        s_net_source_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+    struct sockaddr_in addr = {
+        .sin_family      = AF_INET,
+        .sin_addr.s_addr = htonl(INADDR_ANY),
+        .sin_port        = htons((uint16_t)s_net_source_port),
+    };
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        ESP_LOGE(TAG, "net source: bind(port %d) failed: errno %d", s_net_source_port, errno);
+        close(sock);
+        s_net_source_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "net source: listening for HID events on UDP port %d", s_net_source_port);
+
+    udp_packet_t pkt;
+    while (1) {
+        int len = recvfrom(sock, &pkt, sizeof(pkt), 0, NULL, NULL);
+        if (len < 0) {
+            ESP_LOGW(TAG, "net source: recvfrom() failed: errno %d", errno);
+            continue;
+        }
+        if (len != PACKET_SIZE || pkt.magic != PACKET_MAGIC) {
+            ESP_LOGW(TAG, "net source: dropping malformed packet (len=%d, expected %d; magic=0x%04x, expected 0x%04x)",
+                     len, PACKET_SIZE, pkt.magic, PACKET_MAGIC);
+            continue; // malformed or non-protocol traffic on this port - ignore
+        }
+        switch (pkt.type) {
+        case EVENT_TYPE_KEYBOARD:
+            mruby_dispatch_net_keyboard(pkt.keyboard.modifiers, pkt.keyboard.keycodes);
+            break;
+        case EVENT_TYPE_MOUSE:
+            mruby_dispatch_net_mouse(pkt.mouse.buttons, pkt.mouse.dx, pkt.mouse.dy, pkt.mouse.wheel, pkt.mouse.pan);
+            break;
+        case EVENT_TYPE_CONSUMER:
+            mruby_dispatch_net_consumer(pkt.consumer.usage_id);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+void mruby_filter_start_net_source(void)
+{
+    if (!s_active || !s_net_source_declared) {
+        return;
+    }
+    if (xTaskCreate(net_source_task, "mruby_net_src", 4096, NULL, 5, &s_net_source_task) != pdPASS) {
+        ESP_LOGE(TAG, "net source: failed to start task");
+    }
 }
