@@ -13,7 +13,18 @@
 # ESP-IDF's user-defined data-subtype range (0x40-0xFE) - see
 # mds/usb_hid/2026-08-29_mruby_phase1_impl.md. Offset left blank so
 # gen_esp32part.py places it right after factory.
+#
+# webui_html: same raw storage scheme (4-byte length header + bytes),
+# subtype 0x51, for main/mruby_webui.c's GET / page. Lets the WebUI's own
+# frontend be swapped out over serial too (bin/upload_mruby_script.py
+# --partition webui_html), same as mrb_script - see
+# mds/usb_hid/2026-08-30_mruby_phase2_webui.md. Unlike mrb_script this is
+# read fresh on every GET / (no VM to reload), so no reboot is needed
+# after uploading. 32K is plenty since the page only embeds its own
+# glue HTML/CSS/JS - the syntax highlighter itself (CodeMirror) loads
+# from a CDN, not from this partition.
 nvs,        data, nvs,     0x9000,  24K,
 phy_init,   data, phy,     0xf000,  4K,
 factory,    app,  factory, 0x10000, 3M,
 mrb_script, data, 0x50,    ,        64K,
+webui_html, data, 0x51,    ,        32K,

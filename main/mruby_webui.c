@@ -5,6 +5,7 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,53 +14,154 @@
 
 #define TAG "MRBWEBUI"
 
-// EMBED_TXTFILES (main/CMakeLists.txt) for webui/index.html. The page is
-// served completely static - all dynamic content (current script text,
-// active/hostname status) is fetched by the page's own JS from /api/*
-// after load, rather than templated in here. That keeps this file to
-// plain byte-serving only: no HTML-escaping of arbitrary script content
-// is ever needed on the C side (a script's `#`/`<`/`&` etc. never touch
-// an HTML document - it only ever goes into a JS string via
-// textarea.value, which browsers handle as opaque text).
+// EMBED_TXTFILES (main/CMakeLists.txt) fallback for the page below - used
+// whenever webui_html (below) is empty/erased/invalid, same relationship
+// as mruby_filter.c's embedded default.rb / mrb_script partition. All
+// dynamic content (current script text, active/hostname/frontend status)
+// is fetched by the page's own JS from /api/* after load, rather than
+// templated in here - that keeps this file to plain byte-serving only:
+// no HTML-escaping of arbitrary script content is ever needed on the C
+// side (a script's `#`/`<`/`&` etc. never touch an HTML document - it
+// only ever goes into a JS string via textarea/CodeMirror value, which
+// browsers handle as opaque text).
 extern const uint8_t webui_index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t webui_index_html_end[]   asm("_binary_index_html_end");
 
-// Matches bin/upload_mruby_script.py's MAX_SCRIPT_SIZE (partitions.csv's
-// mrb_script partition is 64K, minus the 4-byte length header
-// mruby_filter.c's mruby_filter_write_script()/load_uploaded_script()
+// Matches bin/upload_mruby_script.py's per-partition size check
+// (partitions.csv's mrb_script partition is 64K, minus the 4-byte length
+// header mruby_filter.c's mruby_filter_write_script()/load_uploaded_script()
 // use).
 #define MAX_SCRIPT_SIZE (64 * 1024 - 4)
 
+// Raw (non-filesystem) storage for one uploaded copy of the WebUI's own
+// frontend page - same on-flash format (4-byte little-endian length +
+// bytes) and same upload tool (bin/upload_mruby_script.py --partition
+// webui_html) as mrb_script, see partitions.csv and
+// mds/usb_hid/2026-08-30_mruby_phase2_webui.md. Unlike the mruby script,
+// this is read fresh on every GET / (no VM/backend state depends on
+// it), so uploading a new one takes effect immediately - no reboot.
+#define WEBUI_HTML_PARTITION_LABEL   "webui_html"
+#define WEBUI_HTML_PARTITION_SUBTYPE 0x51
+#define MAX_FRONTEND_SIZE (32 * 1024 - 4)
+
 static httpd_handle_t s_server;
+
+// Mirrors mruby_filter.c's read_script_partition_raw() for the
+// webui_html partition - kept separate (not a shared helper) since each
+// file owns a different partition and the two have no other overlap.
+// Finds webui_html and reads/validates just its 4-byte length header (no
+// content read/allocation) - NULL if missing/erased/corrupt. Mirrors
+// mruby_filter.c's find_mrb_script_partition().
+static const esp_partition_t *find_webui_html_partition(uint32_t *out_len)
+{
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, WEBUI_HTML_PARTITION_SUBTYPE, WEBUI_HTML_PARTITION_LABEL);
+    if (part == NULL) {
+        return NULL;
+    }
+    uint32_t len;
+    if (esp_partition_read(part, 0, &len, sizeof(len)) != ESP_OK) {
+        return NULL;
+    }
+    if (len == 0 || len == 0xFFFFFFFFu || len > part->size - sizeof(len)) {
+        return NULL; // never uploaded (erased flash reads as 0xFF) or corrupt
+    }
+    *out_len = len;
+    return part;
+}
+
+static bool read_webui_html_partition(char **out_buf, uint32_t *out_len)
+{
+    uint32_t len;
+    const esp_partition_t *part = find_webui_html_partition(&len);
+    if (part == NULL) {
+        return false;
+    }
+    char *buf = malloc(len);
+    if (buf == NULL) {
+        return false;
+    }
+    if (esp_partition_read(part, sizeof(len), buf, len) != ESP_OK) {
+        free(buf);
+        return false;
+    }
+    *out_buf = buf;
+    *out_len = len;
+    return true;
+}
+
+static esp_err_t write_webui_html_partition(const char *data, size_t len)
+{
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, WEBUI_HTML_PARTITION_SUBTYPE, WEBUI_HTML_PARTITION_LABEL);
+    if (part == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (len > part->size - sizeof(uint32_t)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    esp_err_t err = esp_partition_erase_range(part, 0, part->size);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint32_t len_hdr = (uint32_t)len;
+    err = esp_partition_write(part, 0, &len_hdr, sizeof(len_hdr));
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (len > 0) {
+        err = esp_partition_write(part, sizeof(len_hdr), data, len);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    return ESP_OK;
+}
 
 static esp_err_t index_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
+    char *buf;
+    uint32_t len;
+    if (read_webui_html_partition(&buf, &len)) {
+        esp_err_t err = httpd_resp_send(req, buf, (ssize_t)len);
+        free(buf);
+        return err;
+    }
     return httpd_resp_send(req, (const char *)webui_index_html_start,
                             (ssize_t)(webui_index_html_end - webui_index_html_start));
 }
 
 static esp_err_t script_get_handler(httpd_req_t *req)
 {
-    char *buf = malloc(MAX_SCRIPT_SIZE + 1);
+    // Sized to the script's actual length, not the worst-case
+    // MAX_SCRIPT_SIZE - see mruby_filter_read_script()'s comment
+    // (mruby_filter.c) on why this mattered for the "out of memory" 500s
+    // this endpoint used to produce intermittently.
+    size_t len = mruby_filter_script_len();
+    char *buf = malloc(len + 1);
     if (buf == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_FAIL;
     }
-    size_t len = mruby_filter_read_script(buf, MAX_SCRIPT_SIZE + 1);
+    size_t actual = mruby_filter_read_script(buf, len + 1);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
-    esp_err_t err = httpd_resp_send(req, buf, (ssize_t)len);
+    esp_err_t err = httpd_resp_send(req, buf, (ssize_t)actual);
     free(buf);
     return err;
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    char buf[128];
+    uint32_t tmp_len;
+    bool custom_frontend = find_webui_html_partition(&tmp_len) != NULL;
+
+    char buf[192];
     const char *hostname = mruby_filter_hostname();
-    int n = snprintf(buf, sizeof(buf), "mruby: %s\nhostname: %s\n",
+    int n = snprintf(buf, sizeof(buf), "mruby: %s\nhostname: %s\nfrontend: %s\n",
                       mruby_filter_active() ? "active" : "inactive (C filter_rules.h/route_rules.h fallback in effect)",
-                      hostname ? hostname : "(not set by script)");
+                      hostname ? hostname : "(not set by script)",
+                      custom_frontend ? "custom (uploaded via UART)" : "embedded default");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_send(req, buf, (ssize_t)n);
 }
@@ -77,12 +179,16 @@ static void restart_task(void *arg)
     esp_restart();
 }
 
-static esp_err_t script_post_handler(httpd_req_t *req)
+// Reads req's full body into a malloc'd *out_buf (caller frees; NULL if
+// content_len is 0), rejecting anything over max_size. On any failure
+// this has already sent the appropriate httpd_resp_send_err() itself -
+// callers should just propagate ESP_FAIL. Shared by script_post_handler()
+// and frontend_post_handler() below.
+static esp_err_t recv_full_body(httpd_req_t *req, char **out_buf, size_t *out_len, size_t max_size)
 {
     size_t total = req->content_len;
-    if (total > MAX_SCRIPT_SIZE) {
-        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE,
-                             "script too large (mrb_script partition holds at most 64K-4 bytes)");
+    if (total > max_size) {
+        httpd_resp_send_err(req, HTTPD_413_CONTENT_TOO_LARGE, "request body too large for its target partition");
         return ESP_FAIL;
     }
 
@@ -108,6 +214,19 @@ static esp_err_t script_post_handler(httpd_req_t *req)
         }
     }
 
+    *out_buf = buf;
+    *out_len = total;
+    return ESP_OK;
+}
+
+static esp_err_t script_post_handler(httpd_req_t *req)
+{
+    char *buf;
+    size_t total;
+    if (recv_full_body(req, &buf, &total, MAX_SCRIPT_SIZE) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     esp_err_t err = mruby_filter_write_script(buf, total);
     free(buf);
     if (err != ESP_OK) {
@@ -126,6 +245,35 @@ static esp_err_t script_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// POST /api/frontend - uploads a replacement for this page itself (see
+// webui_html above). Not exposed as a button on the page - only reachable
+// via bin/upload_mruby_script.py --partition webui_html over serial, per
+// mds/usb_hid/2026-08-30_mruby_phase2_webui.md (a page editing itself
+// live over HTTP wasn't asked for and adds failure modes - e.g. a bad
+// upload bricking the only way to reach it - that a serial-only path
+// avoids). Takes effect immediately, no restart (index_get_handler reads
+// the partition fresh on every request).
+static esp_err_t frontend_post_handler(httpd_req_t *req)
+{
+    char *buf;
+    size_t total;
+    if (recv_full_body(req, &buf, &total, MAX_FRONTEND_SIZE) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = write_webui_html_partition(buf, total);
+    free(buf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "write_webui_html_partition failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "flash write failed");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "New frontend saved (%d bytes) - in effect immediately", (int)total);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, "Saved.\n", HTTPD_RESP_USE_STRLEN);
+}
+
 void mruby_webui_start(void)
 {
 #if !CONFIG_MRUBY_FILTER_ROUTE_ENABLE
@@ -133,20 +281,23 @@ void mruby_webui_start(void)
 #else
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192; // same rationale as every other mruby-adjacent task - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md
+    config.max_uri_handlers = 8;
 
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start() failed - WebUI not available (bin/upload_mruby_script.py still works)");
         return;
     }
 
-    static const httpd_uri_t index_uri  = { .uri = "/",            .method = HTTP_GET,  .handler = index_get_handler };
-    static const httpd_uri_t script_get = { .uri = "/api/script",  .method = HTTP_GET,  .handler = script_get_handler };
-    static const httpd_uri_t script_post = { .uri = "/api/script", .method = HTTP_POST, .handler = script_post_handler };
-    static const httpd_uri_t status_uri = { .uri = "/api/status",  .method = HTTP_GET,  .handler = status_get_handler };
+    static const httpd_uri_t index_uri     = { .uri = "/",             .method = HTTP_GET,  .handler = index_get_handler };
+    static const httpd_uri_t script_get    = { .uri = "/api/script",   .method = HTTP_GET,  .handler = script_get_handler };
+    static const httpd_uri_t script_post   = { .uri = "/api/script",   .method = HTTP_POST, .handler = script_post_handler };
+    static const httpd_uri_t status_uri    = { .uri = "/api/status",  .method = HTTP_GET,  .handler = status_get_handler };
+    static const httpd_uri_t frontend_post = { .uri = "/api/frontend", .method = HTTP_POST, .handler = frontend_post_handler };
     httpd_register_uri_handler(s_server, &index_uri);
     httpd_register_uri_handler(s_server, &script_get);
     httpd_register_uri_handler(s_server, &script_post);
     httpd_register_uri_handler(s_server, &status_uri);
+    httpd_register_uri_handler(s_server, &frontend_post);
 
     ESP_LOGI(TAG, "WebUI listening on port %d", config.server_port);
 #endif

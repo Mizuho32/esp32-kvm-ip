@@ -494,25 +494,39 @@ static mrb_value ruby_hostname(mrb_state *mrb, mrb_value self)
 
 // ---- script loading -----------------------------------------------------
 
-// Shared by load_uploaded_script() (below) and mruby_filter_read_script()
-// (mruby_webui.c's GET /api/script) - mallocs *out_buf (caller frees) and
-// fills it with the mrb_script partition's script bytes. Returns false if
-// the partition is missing/erased/corrupt - callers fall back to the
-// embedded default.rb, not treat this as fatal.
-static bool read_script_partition_raw(char **out_buf, uint32_t *out_len)
+// Finds the mrb_script partition and reads/validates just its 4-byte
+// length header (no content read, no allocation) - returns NULL if it's
+// missing/erased/corrupt, else the partition (with *out_len set) so the
+// caller can read the content directly at the right offset. Shared by
+// read_script_partition_raw() (below), mruby_filter_read_script(), and
+// mruby_filter_script_len().
+static const esp_partition_t *find_mrb_script_partition(uint32_t *out_len)
 {
     const esp_partition_t *part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, MRB_SCRIPT_PARTITION_SUBTYPE, MRB_SCRIPT_PARTITION_LABEL);
     if (part == NULL) {
-        return false;
+        return NULL;
     }
-
     uint32_t len;
     if (esp_partition_read(part, 0, &len, sizeof(len)) != ESP_OK) {
-        return false;
+        return NULL;
     }
     if (len == 0 || len == 0xFFFFFFFFu || len > part->size - sizeof(len)) {
-        return false; // never uploaded (erased flash reads as 0xFF) or corrupt
+        return NULL; // never uploaded (erased flash reads as 0xFF) or corrupt
+    }
+    *out_len = len;
+    return part;
+}
+
+// Used by load_uploaded_script() (below), which needs its own buffer
+// (mrb_load_nstring() doesn't read straight from flash). mruby_filter_read_script()
+// deliberately does NOT go through this - see its comment.
+static bool read_script_partition_raw(char **out_buf, uint32_t *out_len)
+{
+    uint32_t len;
+    const esp_partition_t *part = find_mrb_script_partition(&len);
+    if (part == NULL) {
+        return false;
     }
 
     char *buf = malloc(len);
@@ -1000,25 +1014,50 @@ void mruby_filter_start_net_source(void)
 
 // ---- WebUI support (Phase 2, mruby_webui.c) ----------------------------
 
+// Deliberately reads straight from the partition into the caller's buf
+// (via find_mrb_script_partition() + esp_partition_read()) rather than
+// going through read_script_partition_raw()'s malloc'd temp buffer +
+// memcpy: mruby_webui.c's GET /api/script calls this on every page
+// load, and briefly holding two copies of a script that can be up to
+// 64K (the fixed-size buffer callers pre-allocate, per mruby_filter.h,
+// plus this function's own malloc'd copy) was a real cause of
+// intermittent "out of memory" 500s from the WebUI - the ESP32-S3 here
+// has no PSRAM enabled (CONFIG_SPIRAM is off), so everything competes
+// for the same ~300-400K of internal SRAM alongside the mruby VM heap,
+// WiFi/lwIP buffers, and every task's stack. See
+// mds/usb_hid/2026-08-30_mruby_phase2_webui.md.
 size_t mruby_filter_read_script(char *buf, size_t buf_size)
 {
     if (buf_size == 0) {
         return 0;
     }
-    char *raw;
     uint32_t raw_len;
-    if (read_script_partition_raw(&raw, &raw_len)) {
+    const esp_partition_t *part = find_mrb_script_partition(&raw_len);
+    if (part != NULL) {
         size_t n = ((size_t)raw_len < buf_size - 1) ? (size_t)raw_len : buf_size - 1;
-        memcpy(buf, raw, n);
-        buf[n] = '\0';
-        free(raw);
-        return n;
+        if (esp_partition_read(part, sizeof(raw_len), buf, n) == ESP_OK) {
+            buf[n] = '\0';
+            return n;
+        }
     }
     size_t dlen = (size_t)(mruby_default_script_end - mruby_default_script_start);
     size_t n = (dlen < buf_size - 1) ? dlen : buf_size - 1;
     memcpy(buf, mruby_default_script_start, n);
     buf[n] = '\0';
     return n;
+}
+
+// Lets mruby_webui.c's GET /api/script allocate a buffer sized to the
+// script's actual length instead of always allocating the worst-case
+// MAX_SCRIPT_SIZE - see mruby_filter_read_script()'s comment on why
+// over-allocating here matters on this board.
+size_t mruby_filter_script_len(void)
+{
+    uint32_t raw_len;
+    if (find_mrb_script_partition(&raw_len) != NULL) {
+        return (size_t)raw_len;
+    }
+    return (size_t)(mruby_default_script_end - mruby_default_script_start);
 }
 
 esp_err_t mruby_filter_write_script(const char *new_script, size_t new_len)

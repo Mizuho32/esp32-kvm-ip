@@ -113,6 +113,12 @@ mruby_host_backend_t mruby_filter_host_backend_at(int index);
 // excluding the NUL.
 size_t mruby_filter_read_script(char *buf, size_t buf_size);
 
+// The exact byte length mruby_filter_read_script() would report (without
+// the NUL, and without truncation) - i.e. how big a buffer to allocate
+// for it. Reads only the 4-byte length header (or uses the embedded
+// default.rb's compile-time size), no content read/allocation.
+size_t mruby_filter_script_len(void);
+
 // Overwrites the mrb_script partition with new_script (new_len bytes,
 // not required to be NUL-terminated) - the same on-flash format
 // bin/upload_mruby_script.py writes (4-byte little-endian length +
