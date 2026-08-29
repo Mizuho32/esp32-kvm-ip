@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_partition.h"
@@ -46,6 +47,22 @@ extern const uint8_t webui_index_html_end[]   asm("_binary_index_html_end");
 
 static httpd_handle_t s_server;
 
+// Prefers PSRAM for this file's buffers (they're only alive for the
+// duration of one HTTP request - script/frontend text, at most tens of
+// KB) so they stop competing with mruby's VM heap and every task's stack
+// for the ~300-400K of internal SRAM alone (this board has no PSRAM
+// registered with plain malloc() - see sdkconfig.defaults'
+// SPIRAM_USE_CAPS_ALLOC comment - so mruby's own allocations are
+// unaffected by this). Falls back to regular (internal) malloc() if
+// PSRAM isn't available for any reason (not enabled, physically absent,
+// or exhausted) - same behavior this code had before PSRAM was added.
+// See mds/usb_hid/2026-08-30_mruby_phase2_webui.md.
+static void *webui_alloc(size_t size)
+{
+    void *p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+    return (p != NULL) ? p : malloc(size);
+}
+
 // Mirrors mruby_filter.c's read_script_partition_raw() for the
 // webui_html partition - kept separate (not a shared helper) since each
 // file owns a different partition and the two have no other overlap.
@@ -77,7 +94,7 @@ static bool read_webui_html_partition(char **out_buf, uint32_t *out_len)
     if (part == NULL) {
         return false;
     }
-    char *buf = malloc(len);
+    char *buf = webui_alloc(len);
     if (buf == NULL) {
         return false;
     }
@@ -139,7 +156,7 @@ static esp_err_t script_get_handler(httpd_req_t *req)
     // (mruby_filter.c) on why this mattered for the "out of memory" 500s
     // this endpoint used to produce intermittently.
     size_t len = mruby_filter_script_len();
-    char *buf = malloc(len + 1);
+    char *buf = webui_alloc(len + 1);
     if (buf == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_FAIL;
@@ -194,7 +211,7 @@ static esp_err_t recv_full_body(httpd_req_t *req, char **out_buf, size_t *out_le
 
     char *buf = NULL;
     if (total > 0) {
-        buf = malloc(total);
+        buf = webui_alloc(total);
         if (buf == NULL) {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
             return ESP_FAIL;

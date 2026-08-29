@@ -43,3 +43,26 @@ CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 # USB Host (Host role only, KVM_ROLE=HOST) - enables Hub-connected devices.
 # Harmless when unused (Device role never installs the USB Host driver).
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
+
+# PSRAM (Seeed XIAO ESP32S3 uses an ESP32-S3R8 module - 8MB Octal PSRAM
+# in-package, matching mds/usb_hid/2026-08-28_mruby_filter_route.md's
+# "想定ハードウェア"). Added to fix an intermittent WebUI "out of memory"
+# 500 that came from competing with mruby's VM heap/task stacks for the
+# ~300-400K of internal SRAM alone - see
+# mds/usb_hid/2026-08-30_mruby_phase2_webui.md.
+#
+# SPIRAM_USE_CAPS_ALLOC (not the default SPIRAM_USE_MALLOC) deliberately
+# keeps plain malloc() internal-only - mruby's VM heap and the
+# latency-sensitive mouse dispatch path (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md)
+# are untouched by this change. Only main/mruby_webui.c's own buffers
+# explicitly opt in via heap_caps_malloc(..., MALLOC_CAP_SPIRAM).
+#
+# SPIRAM_IGNORE_NOTFOUND: if this assumption about the board's PSRAM is
+# wrong (wrong module variant, or genuinely absent), boot proceeds
+# without PSRAM instead of aborting - mruby_webui.c's heap_caps_malloc()
+# calls then simply return NULL and fall back to regular malloc(), same
+# behavior as before this change (see mruby_webui.c's webui_alloc()).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
