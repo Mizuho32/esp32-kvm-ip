@@ -44,6 +44,10 @@ menu "mruby filter/route (Host role)"
             route_rules.h path. If the script fails to load/parse at boot,
             it automatically falls back to the C path regardless of this
             setting - this only controls whether mruby is attempted at all.
-            See mds/usb_hid/2026-08-28_mruby_filter_route.md.
+            Also gates the WebUI (mruby_webui.c, Phase 2): with mruby
+            itself compiled out there's nothing for it to edit, so it's a
+            no-op in that case too.
+            See mds/usb_hid/2026-08-28_mruby_filter_route.md and
+            mds/usb_hid/2026-08-30_mruby_phase2_webui.md.
 
 endmenu

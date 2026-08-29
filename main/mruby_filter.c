@@ -494,11 +494,12 @@ static mrb_value ruby_hostname(mrb_state *mrb, mrb_value self)
 
 // ---- script loading -----------------------------------------------------
 
-// Returns true if a valid uploaded script was found and mrb_load_nstring()'d
-// (caller must still check_error() - a script can be present but fail to
-// parse). False means the partition is missing/erased/corrupt - caller
-// should fall back to the embedded default.rb, not treat this as fatal.
-static bool load_uploaded_script(mrb_state *mrb)
+// Shared by load_uploaded_script() (below) and mruby_filter_read_script()
+// (mruby_webui.c's GET /api/script) - mallocs *out_buf (caller frees) and
+// fills it with the mrb_script partition's script bytes. Returns false if
+// the partition is missing/erased/corrupt - callers fall back to the
+// embedded default.rb, not treat this as fatal.
+static bool read_script_partition_raw(char **out_buf, uint32_t *out_len)
 {
     const esp_partition_t *part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, MRB_SCRIPT_PARTITION_SUBTYPE, MRB_SCRIPT_PARTITION_LABEL);
@@ -516,7 +517,7 @@ static bool load_uploaded_script(mrb_state *mrb)
 
     char *buf = malloc(len);
     if (buf == NULL) {
-        ESP_LOGW(TAG, "load_uploaded_script: malloc(%" PRIu32 ") failed", len);
+        ESP_LOGW(TAG, "read_script_partition_raw: malloc(%" PRIu32 ") failed", len);
         return false;
     }
     esp_err_t err = esp_partition_read(part, sizeof(len), buf, len);
@@ -525,6 +526,22 @@ static bool load_uploaded_script(mrb_state *mrb)
         return false;
     }
 
+    *out_buf = buf;
+    *out_len = len;
+    return true;
+}
+
+// Returns true if a valid uploaded script was found and mrb_load_nstring()'d
+// (caller must still check_error() - a script can be present but fail to
+// parse). False means the partition is missing/erased/corrupt - caller
+// should fall back to the embedded default.rb, not treat this as fatal.
+static bool load_uploaded_script(mrb_state *mrb)
+{
+    char *buf;
+    uint32_t len;
+    if (!read_script_partition_raw(&buf, &len)) {
+        return false;
+    }
     mrb_load_nstring(mrb, buf, len);
     free(buf);
     return true;
@@ -979,4 +996,61 @@ void mruby_filter_start_net_source(void)
     if (xTaskCreate(net_source_task, "mruby_net_src", 4096, NULL, 5, &s_net_source_task) != pdPASS) {
         ESP_LOGE(TAG, "net source: failed to start task");
     }
+}
+
+// ---- WebUI support (Phase 2, mruby_webui.c) ----------------------------
+
+size_t mruby_filter_read_script(char *buf, size_t buf_size)
+{
+    if (buf_size == 0) {
+        return 0;
+    }
+    char *raw;
+    uint32_t raw_len;
+    if (read_script_partition_raw(&raw, &raw_len)) {
+        size_t n = ((size_t)raw_len < buf_size - 1) ? (size_t)raw_len : buf_size - 1;
+        memcpy(buf, raw, n);
+        buf[n] = '\0';
+        free(raw);
+        return n;
+    }
+    size_t dlen = (size_t)(mruby_default_script_end - mruby_default_script_start);
+    size_t n = (dlen < buf_size - 1) ? dlen : buf_size - 1;
+    memcpy(buf, mruby_default_script_start, n);
+    buf[n] = '\0';
+    return n;
+}
+
+esp_err_t mruby_filter_write_script(const char *new_script, size_t new_len)
+{
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, MRB_SCRIPT_PARTITION_SUBTYPE, MRB_SCRIPT_PARTITION_LABEL);
+    if (part == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (new_len > part->size - sizeof(uint32_t)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    // Whole-partition erase (like parttool.py write_partition, what
+    // bin/upload_mruby_script.py uses) - mrb_script is a single 64K
+    // erase-sector-aligned partition, so this is one erase op, not
+    // per-write-call granularity.
+    esp_err_t err = esp_partition_erase_range(part, 0, part->size);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    uint32_t len_hdr = (uint32_t)new_len;
+    err = esp_partition_write(part, 0, &len_hdr, sizeof(len_hdr));
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (new_len > 0) {
+        err = esp_partition_write(part, sizeof(len_hdr), new_script, new_len);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    return ESP_OK;
 }

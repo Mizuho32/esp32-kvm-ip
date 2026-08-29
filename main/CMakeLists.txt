@@ -26,9 +26,11 @@ if(KVM_ROLE STREQUAL "HOST")
             "wifi_manager.c"
             "status_led.c"
             "mruby_filter.c"
+            "mruby_webui.c"
         INCLUDE_DIRS "."
         EMBED_TXTFILES
             "mruby_scripts/default.rb"
+            "webui/index.html"
         PRIV_REQUIRES
             nvs_flash
             esp_wifi
@@ -39,19 +41,22 @@ if(KVM_ROLE STREQUAL "HOST")
             esp_driver_spi
             esp_timer
             esp_partition
+            esp_http_server
             mruby
     )
     # esp_driver_uart (usb_host_rp2040_bridge.c's driver/uart.h), esp_timer
     # (its esp_timer.h, for esp_timer_get_time()), esp_partition
     # (mruby_filter.c's esp_partition.h, for the mrb_script partition - see
-    # mds/usb_hid/2026-08-29_mruby_phase1_impl.md), and mruby (a local
+    # mds/usb_hid/2026-08-29_mruby_phase1_impl.md), esp_http_server
+    # (mruby_webui.c's esp_http_server.h - see
+    # mds/usb_hid/2026-08-30_mruby_phase2_webui.md), and mruby (a local
     # non-registry component, mruby_filter.c's mruby.h - see
     # mds/usb_hid/2026-08-28_mruby_filter_route.md) don't get their include
     # dirs propagated to this component via PRIV_REQUIRES above for reasons
     # that didn't resolve after a full clean reconfigure (esp_driver_gpio/
     # esp_driver_spi in the same list work fine) - linked explicitly
     # instead as a workaround.
-    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart idf::esp_timer idf::esp_partition idf::mruby)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart idf::esp_timer idf::esp_partition idf::esp_http_server idf::mruby)
 elseif(KVM_ROLE STREQUAL "DEVICE")
     idf_component_register(
         SRCS

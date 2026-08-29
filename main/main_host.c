@@ -13,6 +13,7 @@
 
 #include "hid_forwarder.h"
 #include "mruby_filter.h"
+#include "mruby_webui.h"
 #include "protocol.h"
 #include "status_led.h"
 #include "usb_device_typec.h"
@@ -119,6 +120,11 @@ void app_main(void)
     // mruby_filter.h and mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
     mruby_filter_resolve_udp_sinks();
     mruby_filter_start_net_source();
+
+    // Phase 2 (mds/usb_hid/2026-08-30_mruby_phase2_webui.md): browser-based
+    // script editing, no serial/parttool.py round-trip needed. Same
+    // WiFi-must-be-up ordering as the two calls above.
+    mruby_webui_start();
 
     if (hid_forwarder_init() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to init HID forwarder (UDP socket). Restarting in 5s...");

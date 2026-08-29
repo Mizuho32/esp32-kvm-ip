@@ -2,7 +2,10 @@
 #define MRUBY_FILTER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
+
+#include "esp_err.h"
 
 // Host role only (KVM_ROLE=HOST). mruby-scripted source/sink/pipeline DSL
 // replacing filter_rules.h/route_rules.h - see
@@ -99,5 +102,25 @@ typedef enum {
 
 int mruby_filter_host_backend_count(void);
 mruby_host_backend_t mruby_filter_host_backend_at(int index);
+
+// Reads the currently active script's raw source - the uploaded
+// mrb_script partition content if present, else the embedded
+// main/mruby_scripts/default.rb - into buf, NUL-terminated (truncated
+// if buf_size is too small). Works even if mruby failed to activate
+// (only touches the partition/embedded bytes, not the VM). Used by
+// mruby_webui.c (Phase 2, see mds/usb_hid/2026-08-30_mruby_phase2_webui.md)
+// to prefill its edit page. Returns the number of bytes written,
+// excluding the NUL.
+size_t mruby_filter_read_script(char *buf, size_t buf_size);
+
+// Overwrites the mrb_script partition with new_script (new_len bytes,
+// not required to be NUL-terminated) - the same on-flash format
+// bin/upload_mruby_script.py writes (4-byte little-endian length +
+// UTF-8 source). Does not reload the running VM: mruby_webui.c calls
+// esp_restart() after a successful write so the new script takes effect
+// from a clean boot, same as the serial-upload workflow. Returns
+// ESP_ERR_NOT_FOUND if the partition doesn't exist, ESP_ERR_INVALID_SIZE
+// if new_len doesn't fit it.
+esp_err_t mruby_filter_write_script(const char *new_script, size_t new_len);
 
 #endif
