@@ -95,7 +95,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized");
 
-    // Must run before wifi_manager_init() - the script's `hostname "..."`
+    // Must run before wifi_manager_start() - the script's `hostname "..."`
     // call (if any) needs to have been evaluated before the netif is set
     // up. See mds/usb_hid/2026-08-28_mruby_filter_route.md's hostname
     // section: one firmware image is meant to run on multiple boards now,
@@ -105,25 +105,23 @@ void app_main(void)
     mruby_filter_init();
 
 #if !HOST_MINIMAL_TEST
-    esp_err_t wifi_ret = wifi_manager_init(WIFI_SSID, WIFI_PASSWORD, mruby_filter_hostname());
-    if (wifi_ret != ESP_OK) {
-        ESP_LOGE(TAG, "WiFi connection failed (0x%x). Restarting in 5s...", wifi_ret);
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        esp_restart();
-    }
+    // Does not block for an actual AP connection (unlike Device role's
+    // main.c) - local USB Host -> type-c input has no WiFi dependency at
+    // all, so it shouldn't be held up by however long association takes.
+    // WiFi keeps connecting in the background regardless (wifi_manager.c's
+    // event_handler auto-retries forever); IP_EVENT_STA_GOT_IP logs
+    // "WiFi connected" whenever it actually happens, and everything below
+    // this point only needs the TCP/IP thread wifi_manager_start()
+    // already brought up (getaddrinfo()/socket()/bind() - see
+    // mruby_filter.h and mds/usb_hid/2026-08-29_mruby_phase1_impl.md), not
+    // a completed AP association - see mds/usb_hid/2026-08-30_mruby_wifi_deferred.md.
+    ESP_ERROR_CHECK(wifi_manager_start(WIFI_SSID, WIFI_PASSWORD, mruby_filter_hostname()));
 
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-    ESP_LOGI(TAG, "WiFi power save disabled");
-
-    // Must run after wifi_manager_init() (lwIP's TCP/IP thread needs to
-    // be up for getaddrinfo()/socket()/bind() to work) - see
-    // mruby_filter.h and mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
     mruby_filter_resolve_udp_sinks();
     mruby_filter_start_net_source();
 
     // Phase 2 (mds/usb_hid/2026-08-30_mruby_phase2_webui.md): browser-based
-    // script editing, no serial/parttool.py round-trip needed. Same
-    // WiFi-must-be-up ordering as the two calls above.
+    // script editing, no serial/parttool.py round-trip needed.
     mruby_webui_start();
 
     if (hid_forwarder_init() != ESP_OK) {

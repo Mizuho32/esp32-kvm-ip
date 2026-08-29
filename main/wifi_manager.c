@@ -25,6 +25,11 @@ static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
 static bool s_fast_connect = false;
 static bool s_protocol_downgraded = false;
+// Set once by wifi_manager_start(), read later by
+// wifi_manager_wait_connected() (via wifi_fallback_connect()) - promoted
+// from a wifi_manager_init() local to file scope so it survives the
+// split between the two.
+static wifi_config_t s_wifi_config;
 
 // ── NVS helpers ──────────────────────────────────────────────────
 
@@ -151,17 +156,17 @@ static void restore_dhcp(void)
 
 // ── Fallback Full Scan ───────────────────────────────────────────
 
-static esp_err_t wifi_fallback_connect(wifi_config_t *wifi_config)
+static esp_err_t wifi_fallback_connect(void)
 {
     ESP_LOGW(TAG, "Fast reconnect failed, falling back to full scan");
     nvs_clear_cache();
     restore_dhcp();
 
     esp_wifi_disconnect();
-    wifi_config->sta.bssid_set = false;
-    wifi_config->sta.channel = 0;
-    memset(wifi_config->sta.bssid, 0, 6);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, wifi_config));
+    s_wifi_config.sta.bssid_set = false;
+    s_wifi_config.sta.channel = 0;
+    memset(s_wifi_config.sta.bssid, 0, 6);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &s_wifi_config));
     esp_wifi_connect();
 
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
@@ -176,7 +181,7 @@ static esp_err_t wifi_fallback_connect(wifi_config_t *wifi_config)
 
 // ── Public API ───────────────────────────────────────────────────
 
-esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *hostname)
+esp_err_t wifi_manager_start(const char *ssid, const char *password, const char *hostname)
 {
     wifi_event_group = xEventGroupCreate();
 
@@ -199,9 +204,9 @@ esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, NULL));
 
-    wifi_config_t wifi_config = { 0 };
-    strlcpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
-    strlcpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
+    memset(&s_wifi_config, 0, sizeof(s_wifi_config));
+    strlcpy((char *)s_wifi_config.sta.ssid, ssid, sizeof(s_wifi_config.sta.ssid));
+    strlcpy((char *)s_wifi_config.sta.password, password, sizeof(s_wifi_config.sta.password));
     // threshold.authmode is a *minimum* security requirement, not an exact
     // match - WIFI_AUTH_WPA2_WPA3_PSK (the original value here) rejects
     // anything below WPA2/WPA3-transition pre-connection with reason 211
@@ -209,8 +214,8 @@ esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *
     // WPA1-only (WiFi 4) router, so the threshold must be lowered to
     // WPA_PSK to accept it (still accepts WPA2/WPA3 APs too, since those
     // rank higher in wifi_auth_mode_t).
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
-    wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    s_wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
+    s_wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
 
     // Try fast reconnect using cached BSSID + channel + static IP
     wifi_cache_t cache;
@@ -220,15 +225,15 @@ esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *
                  cache.channel,
                  cache.bssid[0], cache.bssid[1], cache.bssid[2],
                  cache.bssid[3], cache.bssid[4], cache.bssid[5]);
-        memcpy(wifi_config.sta.bssid, cache.bssid, 6);
-        wifi_config.sta.bssid_set = true;
-        wifi_config.sta.channel = cache.channel;
+        memcpy(s_wifi_config.sta.bssid, cache.bssid, 6);
+        s_wifi_config.sta.bssid_set = true;
+        s_wifi_config.sta.channel = cache.channel;
         apply_static_ip(&cache);
         s_fast_connect = true;
     }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &s_wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
     // Default STA power-save (WIFI_PS_MIN_MODEM) puts the radio to sleep
@@ -251,6 +256,11 @@ esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *
     ESP_LOGI(TAG, "Connecting to '%s'%s...", ssid,
              s_fast_connect ? " (fast reconnect)" : "");
 
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_wait_connected(void)
+{
     // Wait for IP with appropriate timeout
     TickType_t timeout = s_fast_connect
         ? pdMS_TO_TICKS(FAST_CONNECT_TIMEOUT_MS)
@@ -267,7 +277,7 @@ esp_err_t wifi_manager_init(const char *ssid, const char *password, const char *
     // Fast connect failed — fallback to normal scan
     if (s_fast_connect) {
         s_fast_connect = false;
-        if (wifi_fallback_connect(&wifi_config) == ESP_OK) {
+        if (wifi_fallback_connect() == ESP_OK) {
             return ESP_OK;
         }
     }
