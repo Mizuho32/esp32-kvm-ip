@@ -14,6 +14,7 @@
 #include "hid_forwarder.h"
 #include "mruby_filter.h"
 #include "mruby_webui.h"
+#include "power_manager.h"
 #include "protocol.h"
 #include "status_led.h"
 #include "usb_device_typec.h"
@@ -199,6 +200,13 @@ void app_main(void)
             ESP_LOGW(TAG, "type-c USB Device output failed to start (not fatal - continuing UDP-only)");
         }
     }
+    // Harmless to start even when !typec_capable (usb_device_typec_start()
+    // was never called, so tud_suspend_cb/tud_resume_cb simply never fire
+    // on this board - the task just blocks forever waiting for the first
+    // notification) - see power_manager.h. Skipped entirely under
+    // HOST_MINIMAL_TEST since wifi_manager_start() never ran there either,
+    // so there'd be nothing for wifi_manager_suspend()/_resume() to act on.
+    power_manager_init();
 #else
     (void)typec_capable;
 #endif

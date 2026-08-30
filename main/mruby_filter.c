@@ -150,6 +150,13 @@ static SemaphoreHandle_t s_mrb_mutex;
 static bool s_active;
 static char s_hostname[64];
 static bool s_hostname_set;
+// Read by power_manager.c (via a weak-symbol lookup, since that file is
+// shared with KVM_ROLE=DEVICE builds which don't compile this file in at
+// all) to decide whether a USB suspend should stop WiFi/cycle light
+// sleep/dim the status LED - see mds/usb_hid/2026-8-30_Sleep.md. Defaults
+// to enabled so boards without a script opting out still get the
+// power-saving behavior.
+static bool s_usb_suspend_wifi_sleep_enabled = true;
 
 static void reset_dsl_state(void)
 {
@@ -165,6 +172,7 @@ static void reset_dsl_state(void)
     s_host_backend_count = -1;
     s_host_backends_explicit = false;
     s_hostname_set = false;
+    s_usb_suspend_wifi_sleep_enabled = true;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -519,6 +527,18 @@ static mrb_value ruby_hostname(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `usb_suspend_wifi_sleep false` opts a board out of the WiFi-stop/light-
+// sleep/status-LED reaction to its PC's USB link suspending (power_manager.c)
+// - default is enabled (see s_usb_suspend_wifi_sleep_enabled's declaration).
+static mrb_value ruby_usb_suspend_wifi_sleep(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_bool enabled;
+    mrb_get_args(mrb, "b", &enabled);
+    s_usb_suspend_wifi_sleep_enabled = enabled;
+    return mrb_nil_value();
+}
+
 // ---- script loading -----------------------------------------------------
 
 // Finds the mrb_script partition and reads/validates just its 4-byte
@@ -606,6 +626,7 @@ static void define_dsl_methods(mrb_state *mrb)
 {
     struct RClass *k = mrb->kernel_module;
     mrb_define_method(mrb, k, "hostname", ruby_hostname, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "usb_suspend_wifi_sleep", ruby_usb_suspend_wifi_sleep, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
@@ -699,6 +720,11 @@ mruby_host_backend_t mruby_filter_host_backend_at(int index)
 const char *mruby_filter_hostname(void)
 {
     return s_hostname_set ? s_hostname : NULL;
+}
+
+bool mruby_filter_usb_suspend_wifi_sleep_enabled(void)
+{
+    return s_usb_suspend_wifi_sleep_enabled;
 }
 
 // Resolves every :udp sink's host/port (getaddrinfo()) - deferred out of

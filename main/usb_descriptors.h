@@ -1,6 +1,7 @@
 #ifndef USB_DESCRIPTORS_H
 #define USB_DESCRIPTORS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include "tusb.h"
 #include "class/hid/hid_device.h"
@@ -62,5 +63,17 @@ extern uint8_t usb_string_descriptor_count;
  * based on Kconfig. Must be called before tinyusb_driver_install().
  */
 void usb_descriptors_init(void);
+
+/**
+ * @return true if the PC currently has this USB Device link suspended
+ *         (bus-level SUSPEND state - no SOF traffic for >3ms - tracked
+ *         via tud_suspend_cb()/tud_resume_cb() in usb_descriptors.c).
+ *         Distinct from VBUS/power presence: a suspended PC still
+ *         supplies VBUS, so this is the actual "PC went to sleep" signal
+ *         - see mds/usb_hid/2026-8-30_Sleep.md. Always false if
+ *         tinyusb_driver_install() was never called (e.g. Host role with
+ *         no type-c output).
+ */
+bool usb_device_suspended(void);
 
 #endif

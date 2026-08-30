@@ -25,6 +25,11 @@ static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
 static bool s_fast_connect = false;
 static bool s_protocol_downgraded = false;
+// Set by wifi_manager_suspend(), cleared by wifi_manager_resume() - tells
+// event_handler's WIFI_EVENT_STA_DISCONNECTED branch that esp_wifi_stop()
+// itself is the cause, not a real drop, so it should skip the
+// retry-forever logic (there's nothing to reconnect to yet).
+static bool s_suspending = false;
 // Set once by wifi_manager_start(), read later by
 // wifi_manager_wait_connected() (via wifi_fallback_connect()) - promoted
 // from a wifi_manager_init() local to file scope so it survives the
@@ -93,6 +98,38 @@ static void save_current_connection(void)
     nvs_save_cache(&cache);
 }
 
+// ── Restore DHCP ─────────────────────────────────────────────────
+
+static void restore_dhcp(void)
+{
+    esp_netif_ip_info_t zero = { 0 };
+    esp_netif_dhcpc_stop(s_sta_netif);
+    esp_netif_set_ip_info(s_sta_netif, &zero);
+    esp_netif_dhcpc_start(s_sta_netif);
+}
+
+// ── Drop the cached BSSID/channel pin, back to a normal full scan ──
+
+// Used both by wifi_fallback_connect() (fast-reconnect never got an IP at
+// boot) and event_handler() (WIFI_REASON_NO_AP_FOUND after a previously
+// successful connection - see there). Only clears config/cache/IP mode;
+// callers are responsible for calling esp_wifi_connect() themselves
+// afterwards.
+static void wifi_reset_to_full_scan(void)
+{
+    ESP_LOGW(TAG, "Clearing cached BSSID/channel, falling back to full scan");
+    nvs_clear_cache();
+    restore_dhcp();
+
+    s_wifi_config.sta.bssid_set = false;
+    s_wifi_config.sta.channel = 0;
+    memset(s_wifi_config.sta.bssid, 0, 6);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &s_wifi_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_config() failed: %s", esp_err_to_name(err));
+    }
+}
+
 // ── Event handler ────────────────────────────────────────────────
 
 static void event_handler(void *arg, esp_event_base_t event_base,
@@ -101,15 +138,30 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
         xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
         xEventGroupSetBits(wifi_event_group, WIFI_DISCONNECTED_BIT);
+        if (s_suspending) {
+            // wifi_manager_suspend()'s esp_wifi_stop() causes this same
+            // event - nothing to reconnect to yet, so skip the
+            // retry-forever logic below entirely.
+            return;
+        }
+        wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
         s_retry_num++;
         int delay_ms = (s_retry_num < 10) ? (s_retry_num * 1000) : 10000;
         ESP_LOGW(TAG, "Disconnected (reason %d). Reconnecting in %d ms (attempt %d)...",
                  disc->reason, delay_ms, s_retry_num);
 
-        if (!s_protocol_downgraded && s_retry_num >= PROTOCOL_FALLBACK_RETRY_COUNT) {
+        if (disc->reason == WIFI_REASON_NO_AP_FOUND && s_wifi_config.sta.bssid_set) {
+            // The fast-reconnect cached BSSID/channel no longer matches
+            // any AP in range (router likely changed channel or
+            // restarted) - unlike wifi_manager_wait_connected()'s own
+            // fallback, this auto-retry path would otherwise keep
+            // retrying the exact same stale BSSID/channel forever,
+            // failing with this same reason every time (this is what
+            // produced the reason-201 lockup seen during testing).
+            wifi_reset_to_full_scan();
+        } else if (!s_protocol_downgraded && s_retry_num >= PROTOCOL_FALLBACK_RETRY_COUNT) {
             s_protocol_downgraded = true;
             ESP_LOGW(TAG, "Repeated connection failures, falling back to 802.11b/g only");
             esp_err_t err = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G);
@@ -144,29 +196,13 @@ static void apply_static_ip(const wifi_cache_t *cache)
     ESP_LOGI(TAG, "Static IP set: " IPSTR, IP2STR(&ip_info.ip));
 }
 
-// ── Restore DHCP ─────────────────────────────────────────────────
-
-static void restore_dhcp(void)
-{
-    esp_netif_ip_info_t zero = { 0 };
-    esp_netif_dhcpc_stop(s_sta_netif);
-    esp_netif_set_ip_info(s_sta_netif, &zero);
-    esp_netif_dhcpc_start(s_sta_netif);
-}
-
 // ── Fallback Full Scan ───────────────────────────────────────────
 
 static esp_err_t wifi_fallback_connect(void)
 {
     ESP_LOGW(TAG, "Fast reconnect failed, falling back to full scan");
-    nvs_clear_cache();
-    restore_dhcp();
-
     esp_wifi_disconnect();
-    s_wifi_config.sta.bssid_set = false;
-    s_wifi_config.sta.channel = 0;
-    memset(s_wifi_config.sta.bssid, 0, 6);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &s_wifi_config));
+    wifi_reset_to_full_scan();
     esp_wifi_connect();
 
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
@@ -284,4 +320,18 @@ esp_err_t wifi_manager_wait_connected(void)
 
     ESP_LOGE(TAG, "WiFi initial connection timed out (will keep retrying in background)");
     return ESP_FAIL;
+}
+
+esp_err_t wifi_manager_suspend(void)
+{
+    s_suspending = true;
+    ESP_LOGI(TAG, "Suspending WiFi (USB suspend power saving)");
+    return esp_wifi_stop();
+}
+
+esp_err_t wifi_manager_resume(void)
+{
+    ESP_LOGI(TAG, "Resuming WiFi");
+    s_suspending = false;
+    return esp_wifi_start();
 }

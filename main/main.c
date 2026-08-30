@@ -10,6 +10,7 @@
 
 #include "hid_task.h"
 #include "network_task.h"
+#include "power_manager.h"
 #include "protocol.h"
 #include "status_led.h"
 #include "usb_descriptors.h"
@@ -80,6 +81,8 @@ void app_main(void) {
 
     xRet = xTaskCreatePinnedToCore(hid_task, "hid_task", 4096, NULL, 6, NULL, 1);
     configASSERT(xRet == pdPASS);
+
+    power_manager_init();
 
     status_led_set(true);
     ESP_LOGI(TAG, "System ready - listening for UDP on port %d", UDP_PORT);

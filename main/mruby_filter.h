@@ -55,6 +55,15 @@ void mruby_dispatch_consumer(uint16_t usage_id);
 // (default noset, see the design doc's hostname section).
 const char *mruby_filter_hostname(void);
 
+// The script may call `usb_suspend_wifi_sleep false` to opt this board
+// out of power_manager.c's reaction to its PC's USB link suspending
+// (stopping WiFi, cycling light sleep, dimming the status LED - see
+// mds/usb_hid/2026-8-30_Sleep.md). Defaults to true (enabled) if the
+// script never calls it. power_manager.c looks this up via a weak-symbol
+// reference (this file isn't compiled into KVM_ROLE=DEVICE builds at
+// all, which just get the default true).
+bool mruby_filter_usb_suspend_wifi_sleep_enabled(void);
+
 // Resolves every `sink :name, :udp, host:, port:`'s address. Must be
 // called once, after WiFi is up (main_host.c, right after
 // wifi_manager_init() succeeds) - NOT from mruby_filter_init() itself,

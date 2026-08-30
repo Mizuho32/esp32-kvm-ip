@@ -212,3 +212,50 @@ void tud_hid_set_protocol_cb(uint8_t instance, uint8_t protocol) {
     ESP_LOGI(TAG, "itf %u protocol -> %s", instance,
              protocol == HID_PROTOCOL_BOOT ? "BOOT" : "REPORT");
 }
+
+// Both weak by default in tinyusb's own usbd.c (only becomes a strong,
+// conflicting definition if esp_tinyusb's CONFIG_TINYUSB_SUSPEND_CALLBACK/
+// CONFIG_TINYUSB_RESUME_CALLBACK Kconfig options are turned on - they
+// aren't, so defining these here is safe, same as the tud_hid_*_cb above).
+//
+// USB suspend is a bus-level state (host stops SOF traffic for >3ms),
+// distinct from VBUS/power presence - this is what actually tells us the
+// PC went to sleep/standby, not just "still plugged in". First step
+// toward mds/usb_hid/2026-8-30_Sleep.md's power-management work: just
+// observe and log for now. s_usb_suspended is exposed via
+// usb_descriptors.h for whatever reacts to it next (expected to end up
+// behind an mruby DSL toggle rather than hardcoded here, so this stays a
+// plain state flag rather than growing sleep logic in this file).
+static bool s_usb_suspended;
+
+// power_manager.c is compiled into both roles (see main/CMakeLists.txt),
+// but declared weak and WITHOUT a body here regardless - a weak function
+// *defined* in this same translation unit would get its calls below
+// resolved directly to that local definition at compile time (the "weak"
+// attribute only lets the linker pick a strong definition over another
+// TU's weak one - it does nothing once the caller's own TU already has a
+// body to call), silently shadowing power_manager.c's real definition.
+// A bodyless weak extern instead leaves this genuinely unresolved unless
+// some other .o defines it, hence the null check below.
+extern void power_manager_on_usb_suspend_changed(bool suspended) __attribute__((weak));
+
+void tud_suspend_cb(bool remote_wakeup_en) {
+    s_usb_suspended = true;
+    ESP_LOGI(TAG, "USB suspended (remote_wakeup_en=%d) - PC likely sleeping/suspended",
+             remote_wakeup_en);
+    if (power_manager_on_usb_suspend_changed) {
+        power_manager_on_usb_suspend_changed(true);
+    }
+}
+
+void tud_resume_cb(void) {
+    s_usb_suspended = false;
+    ESP_LOGI(TAG, "USB resumed - PC woke up");
+    if (power_manager_on_usb_suspend_changed) {
+        power_manager_on_usb_suspend_changed(false);
+    }
+}
+
+bool usb_device_suspended(void) {
+    return s_usb_suspended;
+}

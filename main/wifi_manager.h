@@ -60,4 +60,21 @@ esp_err_t wifi_manager_start(const char *ssid, const char *password, const char 
  */
 esp_err_t wifi_manager_wait_connected(void);
 
+/**
+ * Stops WiFi (esp_wifi_stop()) for USB-suspend-triggered power saving
+ * (see power_manager.c, KVM_ROLE=DEVICE only). Suppresses the normal
+ * auto-reconnect-forever handling in this file's event_handler while
+ * stopped, so the disconnect event esp_wifi_stop() itself generates
+ * doesn't spawn a spurious reconnect attempt. Call wifi_manager_resume()
+ * to undo.
+ */
+esp_err_t wifi_manager_suspend(void);
+
+/**
+ * Restarts WiFi after wifi_manager_suspend() (esp_wifi_start()) - the
+ * existing WIFI_EVENT_STA_START handler already calls esp_wifi_connect()
+ * on start, so this alone reconnects without any extra retry logic.
+ */
+esp_err_t wifi_manager_resume(void);
+
 #endif

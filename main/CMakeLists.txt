@@ -25,6 +25,7 @@ if(KVM_ROLE STREQUAL "HOST")
             "hid_report_parser.c"
             "wifi_manager.c"
             "status_led.c"
+            "power_manager.c"
             "mruby_filter.c"
             "mruby_webui.c"
         INCLUDE_DIRS "."
@@ -42,6 +43,7 @@ if(KVM_ROLE STREQUAL "HOST")
             esp_timer
             esp_partition
             esp_http_server
+            esp_hw_support
             mruby
     )
     # esp_driver_uart (usb_host_rp2040_bridge.c's driver/uart.h), esp_timer
@@ -66,6 +68,7 @@ elseif(KVM_ROLE STREQUAL "DEVICE")
             "network_task.c"
             "hid_task.c"
             "status_led.c"
+            "power_manager.c"
         INCLUDE_DIRS "."
         PRIV_REQUIRES
             nvs_flash
@@ -74,6 +77,7 @@ elseif(KVM_ROLE STREQUAL "DEVICE")
             esp_event
             lwip
             esp_driver_gpio
+            esp_hw_support
     )
 else()
     message(FATAL_ERROR "Unknown KVM_ROLE '${KVM_ROLE}' (expected HOST or DEVICE)")

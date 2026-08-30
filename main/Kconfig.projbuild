@@ -32,6 +32,65 @@ menu "USB HID Descriptor"
 
 endmenu
 
+menu "USB suspend power management"
+
+    config USB_SUSPEND_LIGHT_SLEEP_ENABLE
+        bool "Stop WiFi when the PC USB-suspends"
+        default y
+        help
+            Compiled into both roles (power_manager.c): Device role's
+            main.c USB connection, and Host role's optional type-c output
+            (usb_device_typec.c, MAX3421E/RP2040-bridge configs only).
+            When the connected PC suspends (detected via tud_suspend_cb -
+            USB bus-level SUSPEND state, distinct from VBUS/power presence
+            - see mds/usb_hid/2026-8-30_Sleep.md), stops WiFi
+            (esp_wifi_stop()), restarting it when tud_resume_cb fires.
+            Also turns the onboard status LED off/on to match. See
+            USB_SUSPEND_ACTUAL_LIGHT_SLEEP below for the separate (default
+            off) option to also actually light-sleep the CPU meanwhile.
+
+            This is a build-time kill switch, separate from the runtime
+            `usb_suspend_wifi_sleep true/false` mruby DSL directive (Host
+            role only, main/mruby_filter.c) - that one lets a script opt
+            out per-deployment (e.g. a Host board whose WiFi also carries
+            its own real-HID-forwarding duty, where stopping it just
+            because the local type-c PC suspended would be harmful);
+            turning this Kconfig option off instead removes the feature
+            from the firmware entirely, regardless of what any script says.
+
+    config USB_SUSPEND_ACTUAL_LIGHT_SLEEP
+        bool "Also esp_light_sleep_start() the CPU while WiFi is stopped"
+        depends on USB_SUSPEND_LIGHT_SLEEP_ENABLE
+        default n
+        help
+            When enabled, cycles short timer-woken esp_light_sleep_start()
+            slices (esp_sleep_enable_timer_wakeup() - see power_manager.c)
+            while the PC is suspended, instead of just waiting for the
+            resume notification with the CPU fully awake.
+
+            KNOWN BROKEN on real ESP32-S3 hardware with a 40MHz crystal
+            (this project's default, CONFIG_XTAL_FREQ=40) as of 2026-08-30:
+            testing showed esp_light_sleep_start() here corrupts the USB
+            peripheral's state - tud_resume_cb fired far too early (~600ms
+            into a 2s sleep slice), immediately followed by a spurious
+            tud_suspend_cb with a *different* remote_wakeup_en value than
+            the real suspend had (not something a real PC suspend/resume
+            could produce within tens of milliseconds), and the board never
+            recovered. Matches the previously-reported freeze bug
+            (espressif/esp-idf#15451, espressif/arduino-esp32#6581) with no
+            confirmed-working mitigation wired up here. Also, ESP32-S3 has
+            no USB-bus wake source for light sleep in this IDF (no
+            esp_sleep_enable_usb_wakeup() exists - checked against
+            esp_hw_support/include/esp_sleep.h and soc_caps.h) even when it
+            doesn't corrupt anything, so an actual PC resume is only
+            noticed once tinyusb's own task gets a scheduling window to
+            process it during one of the timer-woken slices - expect up to
+            roughly one slice's worth of extra delay (a few seconds), not
+            instant resume. Leave this off unless specifically
+            experimenting with a fix for the corruption above.
+
+endmenu
+
 menu "mruby filter/route (Host role)"
 
     config MRUBY_FILTER_ROUTE_ENABLE
