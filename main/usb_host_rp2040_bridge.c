@@ -13,6 +13,7 @@
 
 #include "hid_forwarder.h"
 #include "hid_report_parser.h"
+#include "mruby_filter.h"
 
 #define TAG "USBHOST_RP2040BRIDGE"
 
@@ -765,27 +766,52 @@ bool usb_host_rp2040_bridge_probe(void)
         return false;
     }
 
-    s_frame_seen = false;
-    reset_parser();
-
-    // The RP2040 side sends a heartbeat frame periodically regardless of
-    // USB device state, so a single validated (checksummed) frame within
-    // a generous window is strong evidence of a real bridge, not line
-    // noise - unlike MAX3421's single-byte revision check, a multi-byte
-    // frame passing a checksum by chance is astronomically unlikely.
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(800);
-    uint8_t buf[32];
-    while (xTaskGetTickCount() < deadline) {
-        int n = uart_read_bytes(BRIDGE_UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(50));
-        for (int i = 0; i < n; i++) {
-            feed_byte(buf[i]);
-        }
-        if (s_frame_seen) {
-            ESP_LOGI(TAG, "RP2040 bridge probe: got a validated frame - present");
-            return true;
-        }
+    // ESP32 and RP2040 are typically powered on together (same supply),
+    // and RP2040's own boot + USB Host stack bring-up can take a while -
+    // a single fixed-length window sometimes runs out before RP2040 has
+    // sent its first heartbeat, making a genuinely-present bridge look
+    // absent. Retried instead of just widening one window, so this also
+    // logs per-attempt progress. Both knobs are script-configurable
+    // (mruby_filter.h's rp2040_bridge_probe_retries/_timeout_ms - see
+    // main/mruby_scripts/default.rb) since how long a board's RP2040
+    // actually takes to boot depends on hardware/firmware this project
+    // doesn't control.
+    int retries = mruby_filter_rp2040_bridge_probe_retries();
+    int timeout_ms = mruby_filter_rp2040_bridge_probe_timeout_ms();
+    if (retries < 1) {
+        retries = 1;
     }
-    ESP_LOGI(TAG, "RP2040 bridge probe: no validated frame within timeout - not present");
+    if (timeout_ms < 50) {
+        timeout_ms = 50;
+    }
+
+    uint8_t buf[32];
+    for (int attempt = 1; attempt <= retries; attempt++) {
+        s_frame_seen = false;
+        reset_parser();
+
+        // The RP2040 side sends a heartbeat frame periodically regardless
+        // of USB device state, so a single validated (checksummed) frame
+        // within a generous window is strong evidence of a real bridge,
+        // not line noise - unlike MAX3421's single-byte revision check, a
+        // multi-byte frame passing a checksum by chance is astronomically
+        // unlikely.
+        const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+        while (xTaskGetTickCount() < deadline) {
+            int n = uart_read_bytes(BRIDGE_UART_PORT, buf, sizeof(buf), pdMS_TO_TICKS(50));
+            for (int i = 0; i < n; i++) {
+                feed_byte(buf[i]);
+            }
+            if (s_frame_seen) {
+                ESP_LOGI(TAG, "RP2040 bridge probe: got a validated frame on attempt %d/%d - present",
+                         attempt, retries);
+                return true;
+            }
+        }
+        ESP_LOGI(TAG, "RP2040 bridge probe: no validated frame within %dms (attempt %d/%d)",
+                 timeout_ms, attempt, retries);
+    }
+    ESP_LOGI(TAG, "RP2040 bridge probe: not present after %d attempt(s)", retries);
     return false;
 }
 

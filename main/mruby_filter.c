@@ -157,6 +157,13 @@ static bool s_hostname_set;
 // to enabled so boards without a script opting out still get the
 // power-saving behavior.
 static bool s_usb_suspend_wifi_sleep_enabled = true;
+// Read by usb_host_rp2040_bridge.c's probe (Host role only, so no weak-
+// symbol lookup needed here unlike power_manager.c - mruby_filter.c is
+// always compiled alongside it). Defaults tuned for ESP32/RP2040 sharing
+// a power rail and booting together - see mruby_filter_rp2040_bridge_probe_retries()'s
+// doc comment in mruby_filter.h.
+static mrb_int s_rp2040_bridge_probe_retries = 3;
+static mrb_int s_rp2040_bridge_probe_timeout_ms = 800;
 
 static void reset_dsl_state(void)
 {
@@ -173,6 +180,8 @@ static void reset_dsl_state(void)
     s_host_backends_explicit = false;
     s_hostname_set = false;
     s_usb_suspend_wifi_sleep_enabled = true;
+    s_rp2040_bridge_probe_retries = 3;
+    s_rp2040_bridge_probe_timeout_ms = 800;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -539,6 +548,27 @@ static mrb_value ruby_usb_suspend_wifi_sleep(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `rp2040_bridge_probe_retries N` / `rp2040_bridge_probe_timeout_ms N` -
+// see mruby_filter_rp2040_bridge_probe_retries()'s doc comment in
+// mruby_filter.h for why these exist and what they default to.
+static mrb_value ruby_rp2040_bridge_probe_retries(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_int n;
+    mrb_get_args(mrb, "i", &n);
+    s_rp2040_bridge_probe_retries = n;
+    return mrb_nil_value();
+}
+
+static mrb_value ruby_rp2040_bridge_probe_timeout_ms(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_int n;
+    mrb_get_args(mrb, "i", &n);
+    s_rp2040_bridge_probe_timeout_ms = n;
+    return mrb_nil_value();
+}
+
 // ---- script loading -----------------------------------------------------
 
 // Finds the mrb_script partition and reads/validates just its 4-byte
@@ -627,6 +657,8 @@ static void define_dsl_methods(mrb_state *mrb)
     struct RClass *k = mrb->kernel_module;
     mrb_define_method(mrb, k, "hostname", ruby_hostname, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "usb_suspend_wifi_sleep", ruby_usb_suspend_wifi_sleep, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "rp2040_bridge_probe_retries", ruby_rp2040_bridge_probe_retries, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "rp2040_bridge_probe_timeout_ms", ruby_rp2040_bridge_probe_timeout_ms, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
@@ -725,6 +757,16 @@ const char *mruby_filter_hostname(void)
 bool mruby_filter_usb_suspend_wifi_sleep_enabled(void)
 {
     return s_usb_suspend_wifi_sleep_enabled;
+}
+
+int mruby_filter_rp2040_bridge_probe_retries(void)
+{
+    return (int)s_rp2040_bridge_probe_retries;
+}
+
+int mruby_filter_rp2040_bridge_probe_timeout_ms(void)
+{
+    return (int)s_rp2040_bridge_probe_timeout_ms;
 }
 
 // Resolves every :udp sink's host/port (getaddrinfo()) - deferred out of

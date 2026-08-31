@@ -12,6 +12,9 @@
 
 # hostname "esp32-kvm-ip-host"   # uncomment to set - default is noset
 
+# rp2040_bridge_probe_retries 3        # uncomment to override - default is 3
+# rp2040_bridge_probe_timeout_ms 800   # uncomment to override - default is 800
+
 source :local_kbd,   :usb_host, kind: :keyboard
 source :local_mouse, :usb_host, kind: :mouse
 source :local_cc,    :usb_host, kind: :consumer

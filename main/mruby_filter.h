@@ -64,6 +64,23 @@ const char *mruby_filter_hostname(void);
 // all, which just get the default true).
 bool mruby_filter_usb_suspend_wifi_sleep_enabled(void);
 
+// The script may call `rp2040_bridge_probe_retries N` / `rp2040_bridge_probe_timeout_ms N`
+// to tune how hard usb_host_rp2040_bridge_probe() (main_host.c's RP2040-
+// bridge-backend detection, tried before MAX3421E/native OTG) looks for a
+// bridge before giving up. Needed because ESP32 and RP2040 are typically
+// powered on together off the same supply, and RP2040's own boot + USB
+// Host stack bring-up can be slow enough that a single fixed-length probe
+// window sometimes finishes before RP2040 has sent its first heartbeat -
+// making a genuinely-present bridge look absent, so main_host.c falls
+// through to the wrong backend (or none) for that boot.
+//
+// Defaults (unset by the script): 3 retries, 800ms per attempt (worst
+// case ~2.4s added boot latency on a board that genuinely has no RP2040
+// bridge - only paid once, at USB Host backend selection). Values below 1
+// retry / 50ms timeout are clamped up by usb_host_rp2040_bridge.c.
+int mruby_filter_rp2040_bridge_probe_retries(void);
+int mruby_filter_rp2040_bridge_probe_timeout_ms(void);
+
 // Resolves every `sink :name, :udp, host:, port:`'s address. Must be
 // called once, after WiFi is up (main_host.c, right after
 // wifi_manager_init() succeeds) - NOT from mruby_filter_init() itself,
