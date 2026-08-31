@@ -81,6 +81,18 @@ bool mruby_filter_usb_suspend_wifi_sleep_enabled(void);
 int mruby_filter_rp2040_bridge_probe_retries(void);
 int mruby_filter_rp2040_bridge_probe_timeout_ms(void);
 
+// The script may call `wifi_reconnect_restart_after N` to set how many
+// *consecutive* WIFI_EVENT_STA_DISCONNECTED failures wifi_manager.c's
+// event_handler tolerates - across both the reason-201 full-scan
+// fallback and the 802.11b/g protocol downgrade, which are just
+// different reconnect attempts along the way, still counted - before
+// giving up and calling esp_restart() outright. Previously this loop
+// retried forever with no ceiling. Defaults to 20 if the script never
+// calls this (unset by the script) - same default wifi_manager.c falls
+// back to on its own when no mruby is present at all (KVM_ROLE=DEVICE).
+// N <= 0 disables the restart (retry forever, the old behavior).
+int mruby_filter_wifi_reconnect_restart_after(void);
+
 // Resolves every `sink :name, :udp, host:, port:`'s address. Must be
 // called once, after WiFi is up (main_host.c, right after
 // wifi_manager_init() succeeds) - NOT from mruby_filter_init() itself,

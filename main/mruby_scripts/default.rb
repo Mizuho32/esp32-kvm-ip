@@ -15,6 +15,8 @@
 # rp2040_bridge_probe_retries 3        # uncomment to override - default is 3
 # rp2040_bridge_probe_timeout_ms 800   # uncomment to override - default is 800
 
+# wifi_reconnect_restart_after 20   # uncomment to override - default is 20, 0 = never restart
+
 source :local_kbd,   :usb_host, kind: :keyboard
 source :local_mouse, :usb_host, kind: :mouse
 source :local_cc,    :usb_host, kind: :consumer

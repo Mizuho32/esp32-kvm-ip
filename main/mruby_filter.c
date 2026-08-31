@@ -164,6 +164,11 @@ static bool s_usb_suspend_wifi_sleep_enabled = true;
 // doc comment in mruby_filter.h.
 static mrb_int s_rp2040_bridge_probe_retries = 3;
 static mrb_int s_rp2040_bridge_probe_timeout_ms = 800;
+// Read by wifi_manager.c (weak-symbol lookup, same reasoning as
+// power_manager.c's - this file isn't compiled into KVM_ROLE=DEVICE
+// builds). 0 means "never restart". Keep this default in sync by hand
+// with wifi_manager.c's own DEFAULT_WIFI_RECONNECT_RESTART_AFTER fallback.
+static mrb_int s_wifi_reconnect_restart_after = 20;
 
 static void reset_dsl_state(void)
 {
@@ -182,6 +187,7 @@ static void reset_dsl_state(void)
     s_usb_suspend_wifi_sleep_enabled = true;
     s_rp2040_bridge_probe_retries = 3;
     s_rp2040_bridge_probe_timeout_ms = 800;
+    s_wifi_reconnect_restart_after = 20;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -569,6 +575,19 @@ static mrb_value ruby_rp2040_bridge_probe_timeout_ms(mrb_state *mrb, mrb_value s
     return mrb_nil_value();
 }
 
+// `wifi_reconnect_restart_after N` - see
+// mruby_filter_wifi_reconnect_restart_after()'s doc comment in
+// mruby_filter.h. 0 disables the restart (retry forever, previous
+// behavior).
+static mrb_value ruby_wifi_reconnect_restart_after(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_int n;
+    mrb_get_args(mrb, "i", &n);
+    s_wifi_reconnect_restart_after = n;
+    return mrb_nil_value();
+}
+
 // ---- script loading -----------------------------------------------------
 
 // Finds the mrb_script partition and reads/validates just its 4-byte
@@ -659,6 +678,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "usb_suspend_wifi_sleep", ruby_usb_suspend_wifi_sleep, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "rp2040_bridge_probe_retries", ruby_rp2040_bridge_probe_retries, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "rp2040_bridge_probe_timeout_ms", ruby_rp2040_bridge_probe_timeout_ms, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "wifi_reconnect_restart_after", ruby_wifi_reconnect_restart_after, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
@@ -767,6 +787,11 @@ int mruby_filter_rp2040_bridge_probe_retries(void)
 int mruby_filter_rp2040_bridge_probe_timeout_ms(void)
 {
     return (int)s_rp2040_bridge_probe_timeout_ms;
+}
+
+int mruby_filter_wifi_reconnect_restart_after(void)
+{
+    return (int)s_wifi_reconnect_restart_after;
 }
 
 // Resolves every :udp sink's host/port (getaddrinfo()) - deferred out of

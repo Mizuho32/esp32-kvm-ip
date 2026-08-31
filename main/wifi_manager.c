@@ -6,6 +6,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_system.h"
 #include "nvs.h"
 
 #define TAG "WIFI"
@@ -19,6 +20,31 @@
 // After this many consecutive failures, drop to 802.11b/g-only, which
 // sidesteps the AP's 11n code path entirely.
 #define PROTOCOL_FALLBACK_RETRY_COUNT 5
+
+// Fallback used when nothing overrides it below - kept in sync by hand
+// with mruby_filter.c's own s_wifi_reconnect_restart_after default (no
+// shared header constant, same as usb_suspend_wifi_sleep's two
+// independently-defaulting "true"s - see wifi_reconnect_restart_after()).
+#define DEFAULT_WIFI_RECONNECT_RESTART_AFTER 20
+
+// Host role's mruby_filter.c (KVM_ROLE=HOST only) may define this to let a
+// script tune how many *consecutive* reconnect failures (this survives
+// across the reason-201 full-scan fallback and the 802.11b/g protocol
+// downgrade above - both are just different reconnect attempts, still
+// counted) to tolerate before giving up and rebooting outright. Weak/
+// bodyless for the same reason as power_manager.c's mruby lookup:
+// KVM_ROLE=DEVICE builds don't compile mruby_filter.c at all, so this
+// resolves to NULL there and wifi_reconnect_restart_after() falls back to
+// the hardcoded default.
+extern int mruby_filter_wifi_reconnect_restart_after(void) __attribute__((weak));
+
+static int wifi_reconnect_restart_after(void)
+{
+    if (mruby_filter_wifi_reconnect_restart_after) {
+        return mruby_filter_wifi_reconnect_restart_after();
+    }
+    return DEFAULT_WIFI_RECONNECT_RESTART_AFTER;
+}
 
 EventGroupHandle_t wifi_event_group;
 static int s_retry_num = 0;
@@ -168,6 +194,12 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "Failed to set 802.11b/g-only protocol: %s", esp_err_to_name(err));
             }
+        }
+
+        int restart_after = wifi_reconnect_restart_after();
+        if (restart_after > 0 && s_retry_num >= restart_after) {
+            ESP_LOGE(TAG, "Failed to reconnect after %d attempts - restarting", s_retry_num);
+            esp_restart();
         }
 
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
