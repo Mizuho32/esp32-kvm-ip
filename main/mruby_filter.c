@@ -1214,3 +1214,41 @@ esp_err_t mruby_filter_write_script(const char *new_script, size_t new_len)
     }
     return ESP_OK;
 }
+
+bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, size_t err_buf_size)
+{
+    // A throwaway mrb_state, not s_mrb: mrb_parse_nstring() only parses
+    // (builds an AST) - it does NOT run mrb_generate_code()/mrb_load_exec(),
+    // so none of the script's top-level DSL calls (source/sink/pipeline/
+    // etc, which mutate this file's static C state - s_sources, s_sinks,
+    // s_pipelines, s_hostname, ...) ever execute. That's what makes this
+    // safe to run against arbitrary untrusted-until-checked script text
+    // without disturbing whatever's currently loaded and running.
+    mrb_state *tmp = mrb_open();
+    if (tmp == NULL) {
+        // Can't verify - the actual load-at-boot path (mruby_filter_init())
+        // still fails open to the embedded default.rb if this script turns
+        // out to be broken, so don't block the save over our own inability
+        // to pre-check it.
+        ESP_LOGW(TAG, "mruby_filter_check_syntax: mrb_open() failed, skipping check");
+        return true;
+    }
+
+    mrb_ccontext *cxt = mrb_ccontext_new(tmp);
+    struct mrb_parser_state *p = mrb_parse_nstring(tmp, script, len, cxt);
+    bool ok = (p != NULL && p->nerr == 0);
+    if (!ok && err_buf != NULL && err_buf_size > 0) {
+        if (p != NULL && p->nerr > 0) {
+            snprintf(err_buf, err_buf_size, "line %u: %s",
+                     p->error_buffer[0].lineno, p->error_buffer[0].message);
+        } else {
+            snprintf(err_buf, err_buf_size, "parse failed (out of memory?)");
+        }
+    }
+    if (p != NULL) {
+        mrb_parser_free(p);
+    }
+    mrb_ccontext_free(tmp, cxt);
+    mrb_close(tmp);
+    return ok;
+}

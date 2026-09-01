@@ -244,6 +244,14 @@ static esp_err_t script_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    char syntax_err[160];
+    if (!mruby_filter_check_syntax(buf, total, syntax_err, sizeof(syntax_err))) {
+        ESP_LOGW(TAG, "Rejected script upload (not saved): %s", syntax_err);
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, syntax_err);
+        return ESP_FAIL;
+    }
+
     esp_err_t err = mruby_filter_write_script(buf, total);
     free(buf);
     if (err != ESP_OK) {

@@ -167,4 +167,19 @@ size_t mruby_filter_script_len(void);
 // if new_len doesn't fit it.
 esp_err_t mruby_filter_write_script(const char *new_script, size_t new_len);
 
+// Pure syntax check - parses script (mrb_parse_nstring(), a throwaway
+// mrb_state) without ever generating code or executing it, so none of the
+// script's top-level DSL calls (source/sink/pipeline/hostname/...) run -
+// safe to call on arbitrary untrusted script text with zero side effects
+// on whatever's currently loaded. Deliberately does NOT catch runtime
+// errors (e.g. a DSL method raising on bad arguments) - those still only
+// surface via the serial log at actual boot time, same as before; this is
+// only meant to catch typos/syntax mistakes before mruby_webui.c commits
+// to writing + rebooting for them.
+//
+// Returns true if it parses cleanly (or if the check itself couldn't run -
+// see the .c file). On a syntax error, writes a short "line N: message"
+// summary into err_buf (truncated to fit err_buf_size) and returns false.
+bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, size_t err_buf_size);
+
 #endif
