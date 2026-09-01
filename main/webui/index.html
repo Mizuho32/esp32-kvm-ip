@@ -21,6 +21,7 @@
 <textarea id="script" spellcheck="false" disabled>loading...</textarea>
 <p>
   <button id="save" disabled>Save &amp; reboot</button>
+  <button id="sleep">Sleep now</button>
   <span id="msg"></span>
 </p>
 <p class="hint">
@@ -31,6 +32,14 @@
   Syntax highlighting is loaded from a CDN (cdn.jsdelivr.net) - if this
   network has no internet access, editing still works as a plain textarea.
 </p>
+<p class="hint">
+  "Sleep now" manually triggers the USB-suspend power-saving reaction
+  (WiFi off) - use it if you connected to a PC that was already suspended
+  before this board booted, since that never fires the automatic detection
+  (only a live suspend/resume transition does). WiFi stops shortly after,
+  so this page becomes unreachable until the PC actually resumes; only use
+  it when the PC really is suspended, or it'll stay off until reset.
+</p>
 
 <script src="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/ruby/ruby.min.js"></script>
@@ -38,6 +47,7 @@
 const scriptEl = document.getElementById('script');
 const statusEl = document.getElementById('status');
 const saveBtn = document.getElementById('save');
+const sleepBtn = document.getElementById('sleep');
 const msgEl = document.getElementById('msg');
 
 // CodeMirror comes from a CDN (see <script> tags above) - if it didn't
@@ -103,6 +113,21 @@ saveBtn.onclick = async () => {
     }
   } catch (e) {
     msgEl.textContent = 'saved - board is rebooting (connection drop here is expected).';
+  }
+};
+
+sleepBtn.onclick = async () => {
+  if (!confirm('Only do this if the PC is actually suspended - WiFi will stop and this page will become unreachable until it resumes (or the board is reset). Continue?')) {
+    return;
+  }
+  sleepBtn.disabled = true;
+  msgEl.textContent = 'sleeping...';
+  try {
+    const res = await fetch('/api/sleep', { method: 'POST' });
+    const text = await res.text();
+    msgEl.textContent = res.ok ? text.trim() : 'error: ' + text;
+  } catch (e) {
+    msgEl.textContent = 'sleeping - WiFi is likely already down (connection drop here is expected).';
   }
 };
 

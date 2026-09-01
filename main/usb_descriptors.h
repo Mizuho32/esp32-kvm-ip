@@ -76,4 +76,17 @@ void usb_descriptors_init(void);
  */
 bool usb_device_suspended(void);
 
+/**
+ * Manually forces usb_device_suspended() to true and notifies
+ * power_manager.c, exactly as if tud_suspend_cb() had just fired. Covers
+ * the case that callback can't: a PC that was *already* suspended before
+ * this board booted/connected to it, which never produces a bus SUSPEND
+ * transition for tinyusb to notice. Used by mruby_webui.c's "Sleep now"
+ * button. Clears back to false normally, via a real tud_resume_cb() once
+ * the PC actually resumes - if it wasn't really suspended, this stays
+ * stuck true (WiFi off) until that happens or the board is reset, so it's
+ * meant as a deliberate user action, not something to call speculatively.
+ */
+void usb_device_force_suspended(void);
+
 #endif

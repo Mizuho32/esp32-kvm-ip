@@ -259,3 +259,19 @@ void tud_resume_cb(void) {
 bool usb_device_suspended(void) {
     return s_usb_suspended;
 }
+
+void usb_device_force_suspended(void) {
+    // tud_suspend_cb() never fires if the PC was *already* suspended
+    // before this board booted/connected (no SUSPEND transition for
+    // tinyusb to notice - it only sees bus events, not a snapshot of
+    // "current" state), so there's a real gap the automatic detection
+    // can't cover on its own. This drives the exact same s_usb_suspended
+    // flag + power_manager notification tud_suspend_cb() does, so it's a
+    // manual stand-in for that missed edge (see mruby_webui.c's /api/sleep -
+    // WebUI "Sleep now" button), not a separate mechanism.
+    s_usb_suspended = true;
+    ESP_LOGI(TAG, "USB suspend forced (manual trigger)");
+    if (power_manager_on_usb_suspend_changed) {
+        power_manager_on_usb_suspend_changed(true);
+    }
+}

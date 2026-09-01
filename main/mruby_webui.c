@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 
 #include "mruby_filter.h"
+#include "usb_descriptors.h"
 
 #define TAG "MRBWEBUI"
 
@@ -183,6 +184,22 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, buf, (ssize_t)n);
 }
 
+// Manually forces the USB-suspend power-management reaction (WiFi stop,
+// see power_manager.c/mds/usb_hid/2026-8-30_Sleep.md) - covers connecting
+// to a PC that was already suspended before this board booted, which
+// never fires tud_suspend_cb() (no bus transition for tinyusb to notice).
+// No separate delay/task needed before responding, unlike restart_task()
+// below: usb_device_force_suspended() only sets a flag and gives a task
+// notification, it doesn't itself touch WiFi - the actual esp_wifi_stop()
+// happens moments later in power_manager_task's own task, well after this
+// handler's response has already gone out.
+static esp_err_t sleep_post_handler(httpd_req_t *req)
+{
+    usb_device_force_suspended();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, "Sleeping - WiFi will stop shortly.\n", HTTPD_RESP_USE_STRLEN);
+}
+
 // Runs esp_restart() from a separate task rather than inline in
 // script_post_handler(): that handler's httpd_resp_send() call above it
 // only queues the response with the httpd worker task's socket, and
@@ -318,11 +335,13 @@ void mruby_webui_start(void)
     static const httpd_uri_t script_post   = { .uri = "/api/script",   .method = HTTP_POST, .handler = script_post_handler };
     static const httpd_uri_t status_uri    = { .uri = "/api/status",  .method = HTTP_GET,  .handler = status_get_handler };
     static const httpd_uri_t frontend_post = { .uri = "/api/frontend", .method = HTTP_POST, .handler = frontend_post_handler };
+    static const httpd_uri_t sleep_post    = { .uri = "/api/sleep",    .method = HTTP_POST, .handler = sleep_post_handler };
     httpd_register_uri_handler(s_server, &index_uri);
     httpd_register_uri_handler(s_server, &script_get);
     httpd_register_uri_handler(s_server, &script_post);
     httpd_register_uri_handler(s_server, &status_uri);
     httpd_register_uri_handler(s_server, &frontend_post);
+    httpd_register_uri_handler(s_server, &sleep_post);
 
     ESP_LOGI(TAG, "WebUI listening on port %d", config.server_port);
 #endif
