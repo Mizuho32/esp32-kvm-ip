@@ -164,6 +164,12 @@ static esp_err_t script_get_handler(httpd_req_t *req)
     }
     size_t actual = mruby_filter_read_script(buf, len + 1);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    // Without this, browsers may serve a cached copy of this response on a
+    // plain reload (no explicit Cache-Control/ETag/Last-Modified means
+    // heuristic caching is allowed) - the WebUI's own save flow already
+    // reboots the board on success, so a reload afterwards is exactly the
+    // "did my edit actually take?" check this would silently break.
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t err = httpd_resp_send(req, buf, (ssize_t)actual);
     free(buf);
     return err;
@@ -181,6 +187,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                       hostname ? hostname : "(not set by script)",
                       custom_frontend ? "custom (uploaded via UART)" : "embedded default");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store"); // same reasoning as script_get_handler()
     return httpd_resp_send(req, buf, (ssize_t)n);
 }
 
