@@ -322,7 +322,20 @@ void mruby_webui_start(void)
     return;
 #else
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.stack_size = 8192; // same rationale as every other mruby-adjacent task - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md
+    // 16384 (was 8192): script_post_handler() runs on this task, and its
+    // mruby_filter_check_syntax() call opens a whole extra mrb_state and
+    // runs a full parse+codegen (this mruby's Prism-based
+    // mrb_parse_nstring() compiles, not just parses - see that function's
+    // comment in mruby_filter.c) - the same class of operation that made
+    // the *main* task's own stack need bumping to 16384 twice over
+    // (CONFIG_ESP_MAIN_TASK_STACK_SIZE, sdkconfig.defaults) for
+    // mruby_filter_init()'s parse+exec of the real script. Confirmed via a
+    // real "Guru Meditation Error ... LoadProhibited" panic inside
+    // FreeRTOS's own scheduler (prvSelectHighestPriorityTaskSMP, A2 =
+    // 0xa5a5a5a5 - FreeRTOS's stack-fill poison byte) right after clicking
+    // Save in the WebUI, i.e. a stack overflow here corrupting adjacent
+    // memory rather than crashing at the overflow site itself.
+    config.stack_size = 16384;
     config.max_uri_handlers = 8;
 
     if (httpd_start(&s_server, &config) != ESP_OK) {

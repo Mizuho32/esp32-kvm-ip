@@ -1248,20 +1248,43 @@ esp_err_t mruby_filter_write_script(const char *new_script, size_t new_len)
 
 bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, size_t err_buf_size)
 {
-    // A throwaway mrb_state, not s_mrb: mrb_parse_nstring() only parses
-    // (builds an AST) - it does NOT run mrb_generate_code()/mrb_load_exec(),
-    // so none of the script's top-level DSL calls (source/sink/pipeline/
-    // etc, which mutate this file's static C state - s_sources, s_sinks,
-    // s_pipelines, s_hostname, ...) ever execute. That's what makes this
-    // safe to run against arbitrary untrusted-until-checked script text
-    // without disturbing whatever's currently loaded and running.
-    mrb_state *tmp = mrb_open();
-    if (tmp == NULL) {
+    // A throwaway mrb_state, not s_mrb - and mrb_open_core() (core VM only,
+    // no mrbgems), not mrb_open(). Originally used mrb_open(), on the
+    // (wrong) assumption that mrb_parse_nstring() only builds an AST - this
+    // mruby version's parser is Prism-based, and mrb_parse_nstring() (via
+    // mrbgems/mruby-compiler/src/mruby_compat.c's parse_source()) actually
+    // runs full codegen internally too, producing real bytecode, not just
+    // an AST. It still never *executes* that bytecode (no mrb_run()), so
+    // the script's top-level DSL calls (source/sink/pipeline/etc, which
+    // mutate this file's static C state - s_sources, s_sinks, s_pipelines,
+    // s_hostname, ...) still never run - that's still what makes this safe
+    // to run against arbitrary untrusted-until-checked script text without
+    // disturbing whatever's currently loaded and running. But codegen
+    // doesn't need any gem's classes/methods to actually exist (mruby
+    // method dispatch is fully dynamic - a call site just compiles to a
+    // SEND instruction naming the method, resolved only if actually run),
+    // so loading the full mrbgems set (Hash/Struct/Regexp/Time/Rational/
+    // Complex/Fiber/eval/... - see the long gem list in the build log) a
+    // second time, on top of the real s_mrb already holding all of it, was
+    // pure waste - likely enough on this PSRAM-less board (see webui_alloc()'s
+    // comment on this board's SRAM being shared/tight) to run the WebUI's
+    // httpd worker task out of heap and crash it before script_post_handler
+    // ever reached mruby_filter_write_script() - which would explain a
+    // "saved" *looking* response (the frontend's fetch() catch-block
+    // fallback text is worded like success) that never actually wrote
+    // anything, if that's what happened.
+    mrb_state *tmp = mrb_open_core();
+    if (tmp == NULL || tmp->exc) {
         // Can't verify - the actual load-at-boot path (mruby_filter_init())
         // still fails open to the embedded default.rb if this script turns
         // out to be broken, so don't block the save over our own inability
-        // to pre-check it.
-        ESP_LOGW(TAG, "mruby_filter_check_syntax: mrb_open() failed, skipping check");
+        // to pre-check it. mrb_open_core() can return non-NULL with ->exc
+        // set on a failed core init (unlike a flat NULL on allocation
+        // failure) - both need the same "can't verify" fallback.
+        ESP_LOGW(TAG, "mruby_filter_check_syntax: mrb_open_core() failed, skipping check");
+        if (tmp != NULL) {
+            mrb_close(tmp);
+        }
         return true;
     }
 
