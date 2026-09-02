@@ -56,6 +56,31 @@ static bool suspend_action_enabled(void)
     return true;
 }
 
+// RP2040 dormant-sleep coordination (mds/usb_hid/2026-08-31_rp2040_sleep_plan.md)
+// - all three weak for the same reason as mruby_filter_usb_suspend_wifi_sleep_enabled()
+// above: usb_host_rp2040_bridge.c and mruby_filter.c are both Host-role-only,
+// but this file is compiled into both KVM_ROLE builds. Resolves to NULL
+// (and rp2040_sleep_action_enabled() falls back to "off") on Device role,
+// or on Host role whenever some other backend (MAX3421E/native OTG) is
+// actually in use this boot - see usb_host_rp2040_bridge_is_active().
+extern bool usb_host_rp2040_bridge_is_active(void) __attribute__((weak));
+extern esp_err_t usb_host_rp2040_bridge_send_sleep(void) __attribute__((weak));
+extern esp_err_t usb_host_rp2040_bridge_send_wake(void) __attribute__((weak));
+extern bool mruby_filter_usb_suspend_rp2040_sleep_enabled(void) __attribute__((weak));
+
+static bool rp2040_bridge_active(void)
+{
+    return usb_host_rp2040_bridge_is_active && usb_host_rp2040_bridge_is_active();
+}
+
+static bool rp2040_sleep_action_enabled(void)
+{
+    if (mruby_filter_usb_suspend_rp2040_sleep_enabled) {
+        return mruby_filter_usb_suspend_rp2040_sleep_enabled();
+    }
+    return false; // default off, same as mruby_filter.c's own default
+}
+
 static TaskHandle_t s_task_handle;
 
 static void power_manager_task(void *arg)
@@ -83,6 +108,21 @@ static void power_manager_task(void *arg)
             ESP_LOGW(TAG, "wifi_manager_suspend() failed: %s", esp_err_to_name(err));
         }
 
+        // Independent of the WiFi-stop decision above (usb_suspend_wifi_sleep) -
+        // see mruby_filter_usb_suspend_rp2040_sleep_enabled()'s doc comment
+        // for why these are separate toggles. rp2040_sleeping tracks whether
+        // this cycle actually sent SLEEP, so resume only sends WAKE back if
+        // it's actually asleep waiting for one.
+        bool rp2040_sleeping = false;
+        if (rp2040_bridge_active() && rp2040_sleep_action_enabled()) {
+            esp_err_t rp_err = usb_host_rp2040_bridge_send_sleep();
+            if (rp_err == ESP_OK) {
+                rp2040_sleeping = true;
+            } else {
+                ESP_LOGW(TAG, "usb_host_rp2040_bridge_send_sleep() failed: %s", esp_err_to_name(rp_err));
+            }
+        }
+
 #if CONFIG_USB_SUSPEND_ACTUAL_LIGHT_SLEEP
         while (usb_device_suspended()) {
             esp_sleep_enable_timer_wakeup(LIGHT_SLEEP_SLICE_US);
@@ -104,6 +144,12 @@ static void power_manager_task(void *arg)
 
         ESP_LOGI(TAG, "PC resumed - restarting WiFi");
         wifi_manager_resume();
+        if (rp2040_sleeping) {
+            esp_err_t rp_err = usb_host_rp2040_bridge_send_wake();
+            if (rp_err != ESP_OK) {
+                ESP_LOGW(TAG, "usb_host_rp2040_bridge_send_wake() failed: %s", esp_err_to_name(rp_err));
+            }
+        }
         status_led_set(true);
     }
 }

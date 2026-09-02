@@ -50,6 +50,16 @@ typedef enum {
     // mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md. Payload: 3x
     // uint32 LE (reports_per_sec, min_interval_us, max_interval_us).
     BRIDGE_MSG_STATS     = 0x05,
+    // ESP32->RP2040 direction (opposite of everything above) - see
+    // mds/usb_hid/2026-08-31_rp2040_sleep_plan.md. Both len=0. RP2040 never
+    // needs an explicit ack/reply: the frame's own bytes hitting its RX
+    // pin are what physically wake it from dormant (a UART start bit is a
+    // falling edge), so BRIDGE_CMD_WAKE's *content* is informational only
+    // - sent so rp2040_host_bridge.ino's log can confirm it survived the
+    // post-wake resync, not because RP2040 needs to parse it to know to
+    // wake.
+    BRIDGE_CMD_SLEEP     = 0x06, // enter dormant sleep now
+    BRIDGE_CMD_WAKE      = 0x07, // (informational only - see above)
 } bridge_msg_type_t;
 
 // USB HID spec bInterfaceProtocol values (not a TinyUSB-specific enum -
@@ -150,6 +160,13 @@ typedef struct {
 static QueueHandle_t s_frame_queue;
 
 static bool s_uart_initialized;
+// Set once usb_host_rp2040_bridge_task_start() actually starts (i.e. this
+// backend is the one in use this boot, not just probed) - power_manager.c
+// checks this (via a weak-symbol lookup, since it's compiled into both
+// KVM_ROLE builds but this file is Host-role-only) before sending a SLEEP/
+// WAKE command, so a board using MAX3421E/native OTG instead never gets a
+// bogus command written to an idle/nonexistent RP2040 link.
+static bool s_bridge_active;
 
 static esp_err_t bridge_uart_init(void)
 {
@@ -759,6 +776,37 @@ static void dispatch_task(void *arg)
     }
 }
 
+// Sends a zero-payload command frame (BRIDGE_CMD_SLEEP/_WAKE only, so
+// far). Checksum simplifies to just msg_type, since every other header
+// field XORed in is 0 (dev_addr/idx/itf_protocol/len_lo/len_hi) and len=0
+// means no payload bytes - see the frame format comment above.
+static esp_err_t bridge_send_cmd(uint8_t msg_type)
+{
+    if (!s_uart_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const uint8_t frame[] = { BRIDGE_SYNC_BYTE, msg_type, 0, 0, 0, 0, 0, msg_type };
+    int written = uart_write_bytes(BRIDGE_UART_PORT, (const char *)frame, sizeof(frame));
+    return (written == (int)sizeof(frame)) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t usb_host_rp2040_bridge_send_sleep(void)
+{
+    ESP_LOGI(TAG, "Sending SLEEP command to RP2040 bridge");
+    return bridge_send_cmd(BRIDGE_CMD_SLEEP);
+}
+
+esp_err_t usb_host_rp2040_bridge_send_wake(void)
+{
+    ESP_LOGI(TAG, "Sending WAKE command to RP2040 bridge");
+    return bridge_send_cmd(BRIDGE_CMD_WAKE);
+}
+
+bool usb_host_rp2040_bridge_is_active(void)
+{
+    return s_bridge_active;
+}
+
 bool usb_host_rp2040_bridge_probe(void)
 {
     if (bridge_uart_init() != ESP_OK) {
@@ -836,5 +884,6 @@ esp_err_t usb_host_rp2040_bridge_task_start(void)
         return ESP_ERR_NO_MEM;
     }
 #endif
+    s_bridge_active = true;
     return ESP_OK;
 }

@@ -17,6 +17,9 @@
 
 # wifi_reconnect_restart_after 20   # uncomment to override - default is 20, 0 = never restart
 
+# usb_suspend_rp2040_sleep true   # uncomment to enable - default is false (unverified on real
+                                  # hardware yet - see mds/usb_hid/2026-08-31_rp2040_sleep_plan.md)
+
 source :local_kbd,   :usb_host, kind: :keyboard
 source :local_mouse, :usb_host, kind: :mouse
 source :local_cc,    :usb_host, kind: :consumer

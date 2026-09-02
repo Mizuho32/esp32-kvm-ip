@@ -93,6 +93,23 @@ int mruby_filter_rp2040_bridge_probe_timeout_ms(void);
 // N <= 0 disables the restart (retry forever, the old behavior).
 int mruby_filter_wifi_reconnect_restart_after(void);
 
+// The script may call `usb_suspend_rp2040_sleep true` to opt this board
+// into power_manager.c also telling the RP2040 bridge backend
+// (usb_host_rp2040_bridge.c, KVM_ROLE=HOST + rp2040_bridge active only) to
+// enter dormant sleep whenever the PC's USB link suspends, alongside the
+// existing WiFi-stop reaction - see
+// mds/usb_hid/2026-08-31_rp2040_sleep_plan.md. Deliberately separate from
+// usb_suspend_wifi_sleep (a board may want one without the other) and
+// deliberately defaults to *false* (opt-in), unlike that toggle's
+// default-true: RP2040 dormant sleep is new and unverified on real
+// hardware as of this writing (dormant/wake clock sequencing has a real
+// hang risk if gotten wrong - see rp2040_host_bridge.ino's
+// enter_rp2040_dormant() comment and raspberrypi/pico-extras#41) and a
+// dormant RP2040 also drops its attached USB HID device, which needs to
+// re-enumerate on wake (added latency, worst case indefinite if wake
+// fails). Turn it on only to test it.
+bool mruby_filter_usb_suspend_rp2040_sleep_enabled(void);
+
 // Resolves every `sink :name, :udp, host:, port:`'s address. Must be
 // called once, after WiFi is up (main_host.c, right after
 // wifi_manager_init() succeeds) - NOT from mruby_filter_init() itself,

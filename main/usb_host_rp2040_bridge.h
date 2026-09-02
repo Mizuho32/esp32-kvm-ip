@@ -61,4 +61,36 @@ bool usb_host_rp2040_bridge_probe(void);
  */
 esp_err_t usb_host_rp2040_bridge_task_start(void);
 
+/**
+ * True once usb_host_rp2040_bridge_task_start() has actually started (this
+ * boot picked the RP2040 bridge, not MAX3421E/native OTG). power_manager.c
+ * checks this (via a weak-symbol lookup, since it's compiled into both
+ * KVM_ROLE builds but this file is Host-role-only) before calling
+ * usb_host_rp2040_bridge_send_sleep()/_send_wake().
+ */
+bool usb_host_rp2040_bridge_is_active(void);
+
+/**
+ * Tells the RP2040 bridge to enter dormant sleep now (see
+ * mds/usb_hid/2026-08-31_rp2040_sleep_plan.md and rp2040_host_bridge.ino's
+ * enter_rp2040_dormant()) - power_manager.c calls this on PC USB suspend,
+ * gated behind both usb_host_rp2040_bridge_is_active() and the mruby
+ * `usb_suspend_rp2040_sleep` toggle (default off - see
+ * mruby_filter_usb_suspend_rp2040_sleep_enabled()). Returns ESP_FAIL if the
+ * UART write didn't send the whole frame, ESP_ERR_INVALID_STATE if the
+ * bridge UART was never initialized.
+ */
+esp_err_t usb_host_rp2040_bridge_send_sleep(void);
+
+/**
+ * Tells the RP2040 bridge to wake up. Not a real "command" the RP2040 can
+ * act on while dormant (its UART is off) - the point is that transmitting
+ * these bytes at all produces a UART start-bit falling edge on RP2040's RX
+ * pin, which is what its armed gpio_set_dormant_irq_enabled() actually
+ * wakes on. Content matters only for rp2040_host_bridge.ino's post-wake log
+ * confirmation, not for the wake itself. Same error returns as
+ * usb_host_rp2040_bridge_send_sleep().
+ */
+esp_err_t usb_host_rp2040_bridge_send_wake(void);
+
 #endif
