@@ -10,6 +10,8 @@
 #include "esp_system.h"
 #include "nvs.h"
 
+#include "status_led.h"
+
 #define TAG "WIFI"
 
 // See wifi_manager_load_credentials() below. Custom subtype 0x52 is in
@@ -60,6 +62,13 @@ static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
 static bool s_fast_connect = false;
 static bool s_protocol_downgraded = false;
+// Set on the first-ever IP_EVENT_STA_GOT_IP since boot, never cleared -
+// distinguishes "still trying to connect for the first time" (LED
+// blinks, status_led_set_blinking(true) in wifi_manager_start()) from a
+// later drop-and-reconnect once we know the network is reachable (LED
+// just goes off while retrying, no blink - see event_handler()'s
+// WIFI_EVENT_STA_DISCONNECTED branch).
+static bool s_ever_connected = false;
 // Set by wifi_manager_suspend(), cleared by wifi_manager_resume() - tells
 // event_handler's WIFI_EVENT_STA_DISCONNECTED branch that esp_wifi_stop()
 // itself is the cause, not a real drop, so it should skip the
@@ -181,6 +190,14 @@ static void event_handler(void *arg, esp_event_base_t event_base,
             // retry-forever logic below entirely.
             return;
         }
+        // Only matters once we've connected before - before that, the
+        // blink status_led_set_blinking(true) started in
+        // wifi_manager_start() just keeps running unattended through any
+        // number of retries below, no extra handling needed here.
+        if (s_ever_connected) {
+            status_led_set(false);
+        }
+
         wifi_event_sta_disconnected_t *disc = (wifi_event_sta_disconnected_t *)event_data;
         s_retry_num++;
         int delay_ms = (s_retry_num < 10) ? (s_retry_num * 1000) : 10000;
@@ -216,6 +233,8 @@ static void event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        status_led_set(true); // also stops the connecting-blink, if it was still running
+        s_ever_connected = true;
         s_retry_num = 0;
         xEventGroupClearBits(wifi_event_group, WIFI_DISCONNECTED_BIT);
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_INIT_DONE_BIT);
@@ -415,6 +434,11 @@ esp_err_t wifi_manager_start(const char *ssid, const char *password, const char 
 
     ESP_LOGI(TAG, "Connecting to '%s'%s...", ssid,
              s_fast_connect ? " (fast reconnect)" : "");
+
+    // Blinks until the first-ever IP_EVENT_STA_GOT_IP (event_handler()
+    // above) - a later reconnect after that doesn't blink again, see
+    // s_ever_connected's comment.
+    status_led_set_blinking(true);
 
     return ESP_OK;
 }

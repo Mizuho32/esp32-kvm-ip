@@ -79,13 +79,16 @@ elseif(KVM_ROLE STREQUAL "DEVICE")
             esp_driver_gpio
             esp_hw_support
             esp_partition
+            esp_timer
     )
     # esp_partition (wifi_manager.c's esp_partition.h, for the wifi_cred
-    # partition - see wifi_manager_load_credentials()) doesn't get its
-    # include dir propagated via PRIV_REQUIRES for the same unresolved
-    # reason as the HOST role's own esp_partition/esp_timer/esp_driver_uart
-    # workaround below - linked explicitly instead.
-    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_partition)
+    # partition - see wifi_manager_load_credentials()) and esp_timer
+    # (status_led.c's esp_timer.h, for the WiFi-connecting blink - see
+    # status_led_set_blinking()) don't get their include dirs propagated
+    # via PRIV_REQUIRES for the same unresolved reason as the HOST role's
+    # own esp_partition/esp_timer/esp_driver_uart workaround below - linked
+    # explicitly instead.
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_partition idf::esp_timer)
 else()
     message(FATAL_ERROR "Unknown KVM_ROLE '${KVM_ROLE}' (expected HOST or DEVICE)")
 endif()

@@ -92,6 +92,11 @@ void app_main(void) {
 
     power_manager_init();
 
+    // Redundant with wifi_manager.c's own event_handler() (which already
+    // called this on IP_EVENT_STA_GOT_IP, well before this point - see
+    // wifi_manager_wait_connected() above) - kept anyway as a harmless,
+    // explicit "definitely on by the time we say ready" rather than
+    // relying entirely on that path.
     status_led_set(true);
     ESP_LOGI(TAG, "System ready - listening for UDP on port %d", UDP_PORT);
 }

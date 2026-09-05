@@ -220,10 +220,17 @@ void app_main(void)
     (void)typec_capable;
 #endif
 
-    status_led_set(true);
 #if !HOST_MINIMAL_TEST
+    // No unconditional status_led_set(true) here - wifi_manager.c's
+    // event_handler() now owns this LED (blinks while connecting for the
+    // first time, solid once connected - see status_led_set_blinking()),
+    // and forcing it on here regardless of that state would cut the
+    // blink short on every boot, defeating the point of it.
     ESP_LOGI(TAG, "System ready - forwarding USB HID input to %s:%d", KVM_TARGET_HOST, UDP_PORT);
 #else
+    // wifi_manager_start() never ran under HOST_MINIMAL_TEST (see
+    // above), so nothing else drives the LED - just show "ready" directly.
+    status_led_set(true);
     ESP_LOGI(TAG, "HOST_MINIMAL_TEST ready - bridge_task running standalone");
 #endif
 }
