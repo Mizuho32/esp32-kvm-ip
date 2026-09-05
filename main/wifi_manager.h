@@ -1,6 +1,9 @@
 #ifndef WIFI_MANAGER_H
 #define WIFI_MANAGER_H
 
+#include <stdbool.h>
+#include <stddef.h>
+
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -37,6 +40,45 @@ extern EventGroupHandle_t wifi_event_group;
  *         mean WiFi is connected yet - see wifi_manager_wait_connected())
  */
 esp_err_t wifi_manager_start(const char *ssid, const char *password, const char *hostname);
+
+/**
+ * Reads SSID/password/hostname out of the wifi_cred flash partition (raw
+ * storage, same scheme as mruby_filter.c's mrb_script / mruby_webui.c's
+ * webui_html - a 4-byte little-endian length header, then plain UTF-8
+ * text "SSID\nPASSWORD\nHOSTNAME\n", hostname line optional) - written via
+ * bin/upload_wifi_credentials.py, not a compile-time constant. Call this
+ * before wifi_manager_start() to get the values to pass it.
+ *
+ * There is no compile-time fallback (main/wifi_credentials.h no longer
+ * holds real credentials) - a missing/erased/corrupt partition just
+ * means WiFi never connects until credentials are uploaded once over
+ * serial, same as a fresh board with the wrong SSID/password today.
+ * ssid_out/password_out are left as empty strings in that case (safe to
+ * pass straight to wifi_manager_start() regardless - it'll just retry
+ * and eventually restart per wifi_reconnect_restart_after(), same as any
+ * other unreachable AP).
+ *
+ * hostname_out (if not NULL) is left as an empty string if the uploaded
+ * credentials didn't include a third line - pass NULL to
+ * wifi_manager_start()'s hostname parameter in that case (its own
+ * documented "leave the chip's default alone" convention), not "".
+ * Pass hostname_out/hostname_cap as NULL/0 if the hostname isn't needed
+ * at all (e.g. Host role, which gets its hostname from the mruby script
+ * instead - see main_host.c).
+ *
+ * @param ssid_out/ssid_cap Buffer for the SSID (recommend 33 bytes:
+ *        IEEE 802.11's 32-byte max + NUL)
+ * @param password_out/password_cap Buffer for the password (recommend 64
+ *        bytes: WPA2's 63-char max + NUL)
+ * @param hostname_out/hostname_cap Buffer for the optional hostname
+ *        (recommend 32 bytes), or NULL/0 to skip it entirely
+ * @return true if the partition held at least a non-empty SSID, false
+ *         otherwise (missing partition, erased flash, or an empty first
+ *         line)
+ */
+bool wifi_manager_load_credentials(char *ssid_out, size_t ssid_cap,
+                                    char *password_out, size_t password_cap,
+                                    char *hostname_out, size_t hostname_cap);
 
 /**
  * Blocks until WiFi actually connects (WIFI_CONNECTED_BIT), trying a

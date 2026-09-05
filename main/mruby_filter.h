@@ -49,10 +49,12 @@ void mruby_dispatch_mouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel,
 void mruby_dispatch_consumer(uint16_t usage_id);
 
 // The script may call `hostname "..."` at load time (see main/mruby_scripts/
-// default.rb) to set the netif hostname main.c/main_host.c would otherwise
-// leave at WIFI_HOSTNAME. Returns NULL if the script never called it -
-// callers should leave the chip's default hostname alone in that case
-// (default noset, see the design doc's hostname section).
+// default.rb) to set the netif hostname - this is the Host role's only
+// source of one (unlike the Device role's main.c, which gets it from the
+// wifi_cred partition instead - see wifi_manager_load_credentials()).
+// Returns NULL if the script never called it - callers should leave the
+// chip's default hostname alone in that case (default noset, see the
+// design doc's hostname section).
 const char *mruby_filter_hostname(void);
 
 // The script may call `usb_suspend_wifi_sleep false` to opt this board

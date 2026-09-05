@@ -23,8 +23,24 @@
 # after uploading. 32K is plenty since the page only embeds its own
 # glue HTML/CSS/JS - the syntax highlighter itself (CodeMirror) loads
 # from a CDN, not from this partition.
+#
+# wifi_cred: same raw storage scheme again, subtype 0x52, for
+# wifi_manager.c's wifi_manager_load_credentials() - written via
+# bin/upload_wifi_credentials.py (never as a compile-time constant in
+# main/wifi_credentials.h, so real credentials never end up in the repo/
+# build tree). Content is plain UTF-8 text, "SSID\nPASSWORD\nHOSTNAME\n"
+# (hostname line optional). Read at boot by both roles (main.c/
+# main_host.c) - unlike mrb_script/webui_html there's no compile-time
+# embedded fallback (a placeholder SSID couldn't connect to anything
+# anyway), so an empty/missing partition just means WiFi never connects
+# until credentials are uploaded. 4K (the minimum here, not 256 bytes) -
+# parttool.py write_partition erases the whole partition before writing,
+# and esptool's erase_region requires the erase size to be a multiple of
+# the 4096-byte flash sector size, same reason mrb_script/webui_html are
+# both already sector-sized.
 nvs,        data, nvs,     0x9000,  24K,
 phy_init,   data, phy,     0xf000,  4K,
 factory,    app,  factory, 0x10000, 3M,
 mrb_script, data, 0x50,    ,        64K,
 webui_html, data, 0x51,    ,        32K,
+wifi_cred,  data, 0x52,    ,        4K,

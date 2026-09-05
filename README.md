@@ -64,24 +64,35 @@ The Target PC sees a regular USB keyboard and mouse, no drivers or software requ
    cd esp32-kvm-ip
    ```
 
-3. Configure WiFi SSID and password:
+3. (Host role only) Set the Device-role board's forwarding target:
    ```
    cp main/wifi_credentials.h.example main/wifi_credentials.h
    ```
-   Edit `main/wifi_credentials.h` and set `WIFI_SSID` / `WIFI_PASSWORD` /
-   `WIFI_HOSTNAME`. This file is gitignored (kept out of the repo) and,
-   unlike a Kconfig value, editing it only recompiles the couple of files
-   that include it instead of the whole project.
-
-   `WIFI_HOSTNAME` is sent to the DHCP server (option 12), so the device
-   shows up under that name in your router's DHCP lease list instead of
-   just an IP address — useful for finding the ESP32's IP on routers like
-   OpenWRT without a static lease.
+   Edit `main/wifi_credentials.h` and set `KVM_TARGET_HOST`. This file is
+   gitignored (kept out of the repo) and, unlike a Kconfig value, editing
+   it only recompiles the couple of files that include it instead of the
+   whole project. WiFi SSID/password are *not* set here - see step 5.
 
 4. Build and flash:
    ```
    idf.py build flash
    ```
+   (a full `flash`, not just the app image - this writes the partition
+   table too, which the board needs on first flash)
+
+5. Upload WiFi credentials over serial (not a compile-time constant -
+   this writes to a flash partition instead, so real credentials never
+   end up in the repo/build tree):
+   ```
+   export ESP_IDF=/opt/esp-idf && source "$ESP_IDF/export.sh"
+   ../bin/upload_wifi_credentials.py --port /dev/ttyUSB0 --ssid "My WiFi" --hostname esp32-kvm-ip
+   ```
+   Prompts for the password interactively (hidden, not echoed - never
+   pass it as a command-line argument). `--hostname` is optional - sent
+   to the DHCP server (option 12), so the device shows up under that name
+   in your router's DHCP lease list instead of just an IP address -
+   useful for finding the ESP32's IP on routers like OpenWRT without a
+   static lease. Reset/power-cycle the board afterwards to connect.
    The ESP32 will connect to WiFi and start listening on UDP port 4210.
 
    Note: on boards with a single native-USB port (e.g. XIAO ESP32S3), that
@@ -205,8 +216,8 @@ esp32-kvm-ip/
 │   ├── tusb_config.h          # TinyUSB configuration
 │   ├── usb_descriptors.c/h    # USB HID descriptors + callbacks
 │   ├── protocol.h             # UDP packet structures + event types
-│   ├── wifi_manager.c/h       # WiFi STA initialization
-│   ├── wifi_credentials.h.example  # Copy to wifi_credentials.h (gitignored) and edit
+│   ├── wifi_manager.c/h       # WiFi STA initialization (SSID/password read from the wifi_cred partition, see bin/upload_wifi_credentials.py)
+│   ├── wifi_credentials.h.example  # Copy to wifi_credentials.h (gitignored) and edit - KVM_TARGET_HOST only, not WiFi credentials
 │   ├── status_led.c/h         # Onboard LED (on once WiFi is up)
 │   ├── network_task.c/h       # UDP receive → xQueue
 │   └── hid_task.c/h           # xQueue → USB HID reports

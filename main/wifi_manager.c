@@ -6,10 +6,19 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "nvs.h"
 
 #define TAG "WIFI"
+
+// See wifi_manager_load_credentials() below. Custom subtype 0x52 is in
+// ESP-IDF's user-defined data-subtype range (0x40-0xFE), same range as
+// mruby_filter.c's mrb_script (0x50) / mruby_webui.c's webui_html (0x51) -
+// see partitions.csv.
+#define WIFI_CRED_PARTITION_LABEL   "wifi_cred"
+#define WIFI_CRED_PARTITION_SUBTYPE 0x52
+#define WIFI_CRED_MAX_LEN           256 // matches partitions.csv's wifi_cred size
 
 #define WIFI_INIT_DONE_BIT   BIT2
 #define NVS_NAMESPACE        "wifi_cache"
@@ -248,6 +257,89 @@ static esp_err_t wifi_fallback_connect(void)
 }
 
 // ── Public API ───────────────────────────────────────────────────
+
+bool wifi_manager_load_credentials(char *ssid_out, size_t ssid_cap,
+                                    char *password_out, size_t password_cap,
+                                    char *hostname_out, size_t hostname_cap)
+{
+    if (ssid_cap > 0) {
+        ssid_out[0] = '\0';
+    }
+    if (password_cap > 0) {
+        password_out[0] = '\0';
+    }
+    if (hostname_out != NULL && hostname_cap > 0) {
+        hostname_out[0] = '\0';
+    }
+
+    const esp_partition_t *part = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, WIFI_CRED_PARTITION_SUBTYPE, WIFI_CRED_PARTITION_LABEL);
+    if (part == NULL) {
+        ESP_LOGW(TAG, "wifi_cred partition not found");
+        return false;
+    }
+
+    uint32_t len;
+    if (esp_partition_read(part, 0, &len, sizeof(len)) != ESP_OK) {
+        return false;
+    }
+    if (len == 0 || len == 0xFFFFFFFFu || len > part->size - sizeof(len)) {
+        ESP_LOGW(TAG, "wifi_cred not uploaded yet (erased/empty) - use bin/upload_wifi_credentials.py");
+        return false;
+    }
+
+    char buf[WIFI_CRED_MAX_LEN];
+    if (len >= sizeof(buf)) {
+        len = sizeof(buf) - 1;
+    }
+    if (esp_partition_read(part, sizeof(uint32_t), buf, len) != ESP_OK) {
+        return false;
+    }
+    buf[len] = '\0';
+
+    const char *cursor = buf;
+    const char *end = buf + len;
+
+    const char *nl = memchr(cursor, '\n', (size_t)(end - cursor));
+    size_t field_len = nl ? (size_t)(nl - cursor) : (size_t)(end - cursor);
+    if (field_len == 0) {
+        ESP_LOGW(TAG, "wifi_cred has no SSID");
+        return false;
+    }
+    if (field_len >= ssid_cap) {
+        field_len = ssid_cap - 1;
+    }
+    memcpy(ssid_out, cursor, field_len);
+    ssid_out[field_len] = '\0';
+    if (nl == NULL) {
+        return true; // SSID only - no password line (open network) or hostname
+    }
+    cursor = nl + 1;
+
+    nl = memchr(cursor, '\n', (size_t)(end - cursor));
+    field_len = nl ? (size_t)(nl - cursor) : (size_t)(end - cursor);
+    if (field_len >= password_cap) {
+        field_len = password_cap - 1;
+    }
+    memcpy(password_out, cursor, field_len);
+    password_out[field_len] = '\0';
+    if (nl == NULL) {
+        return true; // no hostname line
+    }
+    cursor = nl + 1;
+
+    if (hostname_out != NULL && hostname_cap > 0) {
+        nl = memchr(cursor, '\n', (size_t)(end - cursor));
+        field_len = nl ? (size_t)(nl - cursor) : (size_t)(end - cursor);
+        if (field_len >= hostname_cap) {
+            field_len = hostname_cap - 1;
+        }
+        memcpy(hostname_out, cursor, field_len);
+        hostname_out[field_len] = '\0';
+    }
+
+    return true;
+}
 
 esp_err_t wifi_manager_start(const char *ssid, const char *password, const char *hostname)
 {

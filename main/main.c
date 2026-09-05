@@ -14,7 +14,6 @@
 #include "protocol.h"
 #include "status_led.h"
 #include "usb_descriptors.h"
-#include "wifi_credentials.h"
 #include "wifi_manager.h"
 
 #define TAG "MAIN"
@@ -39,8 +38,17 @@ void app_main(void) {
     // 2. Connect WiFi (blocks until IP obtained or retries exhausted) -
     // this board's whole job depends on the network (UDP-only input),
     // so unlike the Host role it keeps blocking here before doing
-    // anything else - see wifi_manager.h.
-    ESP_ERROR_CHECK(wifi_manager_start(WIFI_SSID, WIFI_PASSWORD, WIFI_HOSTNAME));
+    // anything else - see wifi_manager.h. Credentials come from the
+    // wifi_cred partition (bin/upload_wifi_credentials.py), not a
+    // compile-time constant - see wifi_manager_load_credentials().
+    char wifi_ssid[33], wifi_password[64], wifi_hostname[32];
+    if (!wifi_manager_load_credentials(wifi_ssid, sizeof(wifi_ssid),
+                                        wifi_password, sizeof(wifi_password),
+                                        wifi_hostname, sizeof(wifi_hostname))) {
+        ESP_LOGE(TAG, "No WiFi credentials - upload with bin/upload_wifi_credentials.py --port ... --ssid ...");
+    }
+    ESP_ERROR_CHECK(wifi_manager_start(wifi_ssid, wifi_password,
+                                        wifi_hostname[0] ? wifi_hostname : NULL));
     esp_err_t wifi_ret = wifi_manager_wait_connected();
     if (wifi_ret != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connection failed (0x%x). Restarting in 5s...", wifi_ret);

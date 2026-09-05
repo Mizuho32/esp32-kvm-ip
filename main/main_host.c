@@ -116,7 +116,16 @@ void app_main(void)
     // already brought up (getaddrinfo()/socket()/bind() - see
     // mruby_filter.h and mds/usb_hid/2026-08-29_mruby_phase1_impl.md), not
     // a completed AP association - see mds/usb_hid/2026-08-30_mruby_wifi_deferred.md.
-    ESP_ERROR_CHECK(wifi_manager_start(WIFI_SSID, WIFI_PASSWORD, mruby_filter_hostname()));
+    // Credentials come from the wifi_cred partition
+    // (bin/upload_wifi_credentials.py), not a compile-time constant - see
+    // wifi_manager_load_credentials(). Hostname is unrelated - that's the
+    // mruby script's `hostname` call above, not this partition.
+    char wifi_ssid[33], wifi_password[64];
+    if (!wifi_manager_load_credentials(wifi_ssid, sizeof(wifi_ssid),
+                                        wifi_password, sizeof(wifi_password), NULL, 0)) {
+        ESP_LOGE(TAG, "No WiFi credentials - upload with bin/upload_wifi_credentials.py --port ... --ssid ...");
+    }
+    ESP_ERROR_CHECK(wifi_manager_start(wifi_ssid, wifi_password, mruby_filter_hostname()));
 
     mruby_filter_resolve_udp_sinks();
     mruby_filter_start_net_source();
