@@ -95,6 +95,23 @@ int mruby_filter_rp2040_bridge_probe_timeout_ms(void);
 // N <= 0 disables the restart (retry forever, the old behavior).
 int mruby_filter_wifi_reconnect_restart_after(void);
 
+// The script may call `wifi_fast_reconnect_static_ip true` to opt this
+// board into wifi_manager.c's old always-on behavior: once a cached
+// BSSID/channel/IP/GW/netmask exists in NVS (saved after any successful
+// connect), every later boot skips the DHCP handshake entirely and just
+// self-assigns the cached IP directly (apply_static_ip()). This shaves the
+// DHCP round-trip off boot time, but the router never sees a real DHCP
+// transaction again after the first-ever boot - its dnsmasq lease table
+// (and therefore hostname-based DNS resolution) only reflects that first
+// lease, which silently expires over time even though the board keeps
+// working fine at the IP layer (ping still succeeds - only DNS/lease
+// listing breaks). See mds/usb_hid/2026-09-06_wifi_fast_reconnect_static_ip.md
+// for how this was found. Defaults to *false*: every
+// boot does a real DHCP negotiation (BSSID/channel are still reused from
+// the cache either way, for faster AP selection/association - only the IP
+// assignment step is affected by this toggle).
+bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void);
+
 // The script may call `usb_suspend_rp2040_sleep true` to opt this board
 // into power_manager.c also telling the RP2040 bridge backend
 // (usb_host_rp2040_bridge.c, KVM_ROLE=HOST + rp2040_bridge active only) to

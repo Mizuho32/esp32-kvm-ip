@@ -57,6 +57,21 @@ static int wifi_reconnect_restart_after(void)
     return DEFAULT_WIFI_RECONNECT_RESTART_AFTER;
 }
 
+// Same weak-symbol reasoning as above (KVM_ROLE=DEVICE builds don't
+// compile mruby_filter.c at all, so this resolves to NULL there and falls
+// back to the false default below - see
+// mruby_filter_wifi_fast_reconnect_static_ip_enabled()'s doc comment in
+// mruby_filter.h for why false, not true, is the safer default).
+extern bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void) __attribute__((weak));
+
+static bool wifi_fast_reconnect_static_ip_enabled(void)
+{
+    if (mruby_filter_wifi_fast_reconnect_static_ip_enabled) {
+        return mruby_filter_wifi_fast_reconnect_static_ip_enabled();
+    }
+    return false;
+}
+
 EventGroupHandle_t wifi_event_group;
 static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
@@ -407,7 +422,17 @@ esp_err_t wifi_manager_start(const char *ssid, const char *password, const char 
         memcpy(s_wifi_config.sta.bssid, cache.bssid, 6);
         s_wifi_config.sta.bssid_set = true;
         s_wifi_config.sta.channel = cache.channel;
-        apply_static_ip(&cache);
+        // BSSID/channel reuse above always applies (faster AP
+        // association/scan regardless of this toggle) - only the IP
+        // assignment step is opt-in, since skipping DHCP here means the
+        // router never sees a real DHCP transaction again after the
+        // first-ever boot (breaks hostname/DNS resolution over time even
+        // though the board keeps working at the IP layer - see
+        // mruby_filter_wifi_fast_reconnect_static_ip_enabled()'s doc
+        // comment). Default false: do a real DHCP handshake every boot.
+        if (wifi_fast_reconnect_static_ip_enabled()) {
+            apply_static_ip(&cache);
+        }
         s_fast_connect = true;
     }
 

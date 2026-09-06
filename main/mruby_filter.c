@@ -179,6 +179,12 @@ static mrb_int s_wifi_reconnect_restart_after = 20;
 // until confirmed working on real hardware, unlike usb_suspend_wifi_sleep's
 // default-true.
 static bool s_usb_suspend_rp2040_sleep_enabled = false;
+// Read by wifi_manager.c (weak-symbol lookup, same reasoning as
+// s_wifi_reconnect_restart_after above). Defaults to false: skips
+// apply_static_ip() so every boot does a real DHCP handshake - see
+// mruby_filter_wifi_fast_reconnect_static_ip_enabled()'s doc comment in
+// mruby_filter.h for why that's the safer default.
+static bool s_wifi_fast_reconnect_static_ip_enabled = false;
 
 static void reset_dsl_state(void)
 {
@@ -199,6 +205,7 @@ static void reset_dsl_state(void)
     s_rp2040_bridge_probe_timeout_ms = 800;
     s_wifi_reconnect_restart_after = 20;
     s_usb_suspend_rp2040_sleep_enabled = false;
+    s_wifi_fast_reconnect_static_ip_enabled = false;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -613,6 +620,18 @@ static mrb_value ruby_usb_suspend_rp2040_sleep(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `wifi_fast_reconnect_static_ip true/false` - see
+// mruby_filter_wifi_fast_reconnect_static_ip_enabled()'s doc comment in
+// mruby_filter.h. Default false (every boot does a real DHCP handshake).
+static mrb_value ruby_wifi_fast_reconnect_static_ip(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_bool enabled;
+    mrb_get_args(mrb, "b", &enabled);
+    s_wifi_fast_reconnect_static_ip_enabled = enabled;
+    return mrb_nil_value();
+}
+
 // ---- script loading -----------------------------------------------------
 
 // Finds the mrb_script partition and reads/validates just its 4-byte
@@ -705,6 +724,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "rp2040_bridge_probe_timeout_ms", ruby_rp2040_bridge_probe_timeout_ms, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "wifi_reconnect_restart_after", ruby_wifi_reconnect_restart_after, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "usb_suspend_rp2040_sleep", ruby_usb_suspend_rp2040_sleep, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "wifi_fast_reconnect_static_ip", ruby_wifi_fast_reconnect_static_ip, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
@@ -823,6 +843,11 @@ int mruby_filter_wifi_reconnect_restart_after(void)
 bool mruby_filter_usb_suspend_rp2040_sleep_enabled(void)
 {
     return s_usb_suspend_rp2040_sleep_enabled;
+}
+
+bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void)
+{
+    return s_wifi_fast_reconnect_static_ip_enabled;
 }
 
 // Resolves every :udp sink's host/port (getaddrinfo()) - deferred out of

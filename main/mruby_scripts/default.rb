@@ -20,6 +20,11 @@
 # usb_suspend_rp2040_sleep true   # uncomment to enable - default is false (unverified on real
                                   # hardware yet - see mds/usb_hid/2026-08-31_rp2040_sleep_plan.md)
 
+# wifi_fast_reconnect_static_ip true   # uncomment to enable - default is false (every boot does a
+                                       # real DHCP handshake; enabling this skips it once a cached
+                                       # IP exists, which breaks hostname/DNS resolution on the
+                                       # router over time - see mds/usb_hid/2026-09-06_wifi_fast_reconnect_static_ip.md)
+
 source :local_kbd,   :usb_host, kind: :keyboard
 source :local_mouse, :usb_host, kind: :mouse
 source :local_cc,    :usb_host, kind: :consumer
