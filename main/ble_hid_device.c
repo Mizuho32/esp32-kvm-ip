@@ -150,6 +150,11 @@ static esp_hidd_dev_t *s_hid_dev;
 static bool s_connected;
 static bool s_started;
 
+// Forward-declared: defined alongside ble_hid_device_mouse_report() below,
+// but hidd_event_callback() (right below) needs to call it on connect/
+// disconnect.
+static void ble_hid_mouse_pending_reset(void);
+
 // ═══════════════════════════════════════════════════════════════════
 //  HID device event callback
 // ═══════════════════════════════════════════════════════════════════
@@ -169,6 +174,7 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
     case ESP_HIDD_CONNECT_EVENT:
         ESP_LOGI(TAG, "connected");
         s_connected = true;
+        ble_hid_mouse_pending_reset(); // discard any backlog from before this connection existed
         break;
     case ESP_HIDD_PROTOCOL_MODE_EVENT:
         // Diagnostic only - see mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
@@ -187,6 +193,7 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
         ESP_LOGI(TAG, "disconnected (reason %d) - resuming advertising",
                  param->disconnect.reason);
         s_connected = false;
+        ble_hid_mouse_pending_reset(); // don't deliver a stale backlog as one big jump on reconnect
         esp_hid_ble_gap_adv_start();
         break;
     case ESP_HIDD_STOP_EVENT:
@@ -270,34 +277,85 @@ void ble_hid_device_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]
     esp_hidd_dev_input_set(s_hid_dev, 0, BLE_HID_REPORT_ID_KEYBOARD, buf, sizeof(buf));
 }
 
+// BLE can carry at most one GATT notification per connection event (see
+// esp_hid_gap.c's BLE_GAP_EVENT_CONNECT handler, which now requests the
+// shortest interval the spec allows - 7.5ms - but that's still a hard
+// per-connection-event cap, not a queue). A physical mouse sampling
+// faster than that occasionally hits esp_hidd_dev_input_set() before the
+// previous notification has actually gone out, which fails outright
+// (ble_gatts_notify_custom() -> ble_att_clt_tx_notify() doesn't queue -
+// see mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up). dx/dy/
+// wheel/pan are relative deltas, so a failed send doesn't have to mean
+// lost motion: accumulate it into the next attempt instead of dropping
+// it on the floor. buttons is deliberately *not* accumulated here - it's
+// the current absolute button state (not a delta), so the next real
+// sample already carries the right value regardless of what got dropped.
+static int32_t s_pending_dx, s_pending_dy, s_pending_wheel, s_pending_pan;
+
+// Called on connect/disconnect (hidd_event_callback() above) so a
+// backlog accumulated before a connection existed - or before a *new*
+// one after a drop - never gets delivered as one large surprise jump.
+static void ble_hid_mouse_pending_reset(void)
+{
+    s_pending_dx = s_pending_dy = s_pending_wheel = s_pending_pan = 0;
+}
+
 void ble_hid_device_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
 {
     if (!ble_hid_device_connected()) {
         return;
     }
+
+    int32_t total_dx    = s_pending_dx    + dx;
+    int32_t total_dy    = s_pending_dy    + dy;
+    int32_t total_wheel = s_pending_wheel + wheel;
+    int32_t total_pan   = s_pending_pan   + pan;
+
+    // Clamp to the report map's actual field widths (16-bit signed for
+    // dx/dy, 8-bit signed for wheel/pan - see ble_hid_device.h) instead
+    // of letting a large backlog silently wrap. A backlog this big is
+    // already well past what one report can carry regardless; clamping
+    // loses only the excess beyond the field's range, not the whole delta.
+    if (total_dx > INT16_MAX) total_dx = INT16_MAX;
+    else if (total_dx < INT16_MIN) total_dx = INT16_MIN;
+    if (total_dy > INT16_MAX) total_dy = INT16_MAX;
+    else if (total_dy < INT16_MIN) total_dy = INT16_MIN;
+    if (total_wheel > INT8_MAX) total_wheel = INT8_MAX;
+    else if (total_wheel < INT8_MIN) total_wheel = INT8_MIN;
+    if (total_pan > INT8_MAX) total_pan = INT8_MAX;
+    else if (total_pan < INT8_MIN) total_pan = INT8_MIN;
+
     // Little-endian, matching the report map's byte order (and this
     // MCU's own native endianness, so a straight memcpy is correct) -
     // see ble_hid_device.h.
     uint8_t buf[7];
     buf[0] = buttons;
-    memcpy(&buf[1], &dx, 2);
-    memcpy(&buf[3], &dy, 2);
-    buf[5] = (uint8_t)wheel;
-    buf[6] = (uint8_t)pan;
+    int16_t out_dx = (int16_t)total_dx;
+    int16_t out_dy = (int16_t)total_dy;
+    memcpy(&buf[1], &out_dx, 2);
+    memcpy(&buf[3], &out_dy, 2);
+    buf[5] = (uint8_t)(int8_t)total_wheel;
+    buf[6] = (uint8_t)(int8_t)total_pan;
+
     // esp_hidd_dev_input_set()'s return value used to be silently
-    // discarded - the actual bug (hid_forwarder.c gating the whole mruby
-    // pipeline, BLE sink included, behind usb_device_typec_connected() -
-    // see mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up) has
-    // since been found and fixed elsewhere, so this only logs on an
-    // actual send failure now - a per-call success log was tried
-    // temporarily during that investigation and dropped again: this
-    // fires on every physical mouse-move event, and this project has
-    // already measured blocking UART console output as a real source of
-    // input latency on this same hot path (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md).
+    // discarded - a per-call success log was tried temporarily during an
+    // earlier investigation and dropped again: this fires on every
+    // physical mouse-move event, and this project has already measured
+    // blocking UART console output as a real source of input latency on
+    // this same hot path (mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md).
     esp_err_t err = esp_hidd_dev_input_set(s_hid_dev, 0, BLE_HID_REPORT_ID_MOUSE, buf, sizeof(buf));
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "mouse report send failed: %s (buttons=%u dx=%d dy=%d)",
+        // Couldn't fit this connection event - hold onto the accumulated
+        // deltas (this call's own dx/dy/wheel/pan included) for the next
+        // attempt instead of dropping the motion.
+        s_pending_dx    = total_dx;
+        s_pending_dy    = total_dy;
+        s_pending_wheel = total_wheel;
+        s_pending_pan   = total_pan;
+        ESP_LOGW(TAG, "mouse report send failed: %s (buttons=%u dx=%d dy=%d) - accumulating for retry",
                  esp_err_to_name(err), buttons, dx, dy);
+    } else {
+        ble_hid_mouse_pending_reset();
     }
 }
 

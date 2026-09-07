@@ -845,6 +845,38 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "connection %s; status=%d",
                 event->connect.status == 0 ? "established" : "failed",
                 event->connect.status);
+        if (event->connect.status == 0) {
+            // Neither this file nor esp_hid's own nimble_hidd.c ever asked
+            // for a short connection interval - the only itvl_min/max
+            // configured anywhere (esp_hid_ble_gap_adv_init() above) is the
+            // *advertising* interval, which stops mattering the moment a
+            // connection exists. Left alone, the interval is whatever the
+            // central (PC) unilaterally picks, which tends to be a
+            // power-saving-biased default (commonly 30-50ms) rather than
+            // the ~7.5-15ms real BLE HID peripherals (mice/keyboards)
+            // request for themselves - see mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+            // follow-up: this is the leading suspect for BLE-routed mouse
+            // motion feeling noticeably lower-FPS than type-c/UDP. Request
+            // a short interval right away; the central can still decline/
+            // renegotiate (watch for BLE_GAP_EVENT_CONN_UPDATE above).
+            struct ble_gap_upd_params params = {
+                // Raw units (1.25ms each), not BLE_GAP_INITIAL_CONN_ITVL_MIN/MAX -
+                // those are nimble's *initiator*-role defaults (30-50ms,
+                // the very power-saving-biased range this is trying to
+                // get away from), unrelated to what a peripheral should
+                // request for itself.
+                .itvl_min = 6,  // 6 * 1.25ms = 7.5ms
+                .itvl_max = 12, // 12 * 1.25ms = 15ms
+                .latency = 0,
+                .supervision_timeout = 400, // 4s - standard default, plenty for this itvl/latency
+                .min_ce_len = 0,
+                .max_ce_len = 0,
+            };
+            rc = ble_gap_update_params(event->connect.conn_handle, &params);
+            if (rc != 0) {
+                ESP_LOGW(TAG, "ble_gap_update_params (request short interval) failed: %d", rc);
+            }
+        }
         return 0;
         break;
     case BLE_GAP_EVENT_DISCONNECT:
