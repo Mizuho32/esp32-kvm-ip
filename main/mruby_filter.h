@@ -112,6 +112,15 @@ int mruby_filter_wifi_reconnect_restart_after(void);
 // assignment step is affected by this toggle).
 bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void);
 
+// True if the loaded script declared at least one `sink :name, :ble`
+// (see dsl_sink()). main_host.c calls ble_hid_device_start() only when
+// this is true - a board whose script never declares a :ble sink never
+// pulls in the NimBLE/esp_hid stack at all (same opt-in-by-declaration
+// pattern as :udp sinks/sources - no separate boolean toggle exists for
+// this, unlike usb_suspend_wifi_sleep/usb_suspend_rp2040_sleep). See
+// mds/usb_hid/2026-09-07_ble_hid_sink_plan.md.
+bool mruby_filter_ble_sink_declared(void);
+
 // The script may call `usb_suspend_rp2040_sleep true` to opt this board
 // into power_manager.c also telling the RP2040 bridge backend
 // (usb_host_rp2040_bridge.c, KVM_ROLE=HOST + rp2040_bridge active only) to

@@ -33,6 +33,15 @@ sink :typec_kbd,   :typec, kind: :keyboard
 sink :typec_mouse, :typec, kind: :mouse
 sink :typec_cc,    :typec, kind: :consumer
 
+# :ble sinks (mds/usb_hid/2026-09-07_ble_hid_sink_plan.md) - a Bluetooth
+# LE HID output straight to the target PC, no wired USB connection to it
+# needed. Uncomment to enable (pulls in the NimBLE/esp_hid stack - see
+# mruby_filter_ble_sink_declared()). Can run at the same time as the
+# :typec sinks above (`to :typec_kbd, :ble_kbd` etc.) - not exclusive.
+# sink :ble_kbd,   :ble, kind: :keyboard
+# sink :ble_mouse, :ble, kind: :mouse
+# sink :ble_cc,    :ble, kind: :consumer
+
 pipeline :keyboard do
   from :local_kbd
   to :typec_kbd   # no block = pure passthrough fan-out

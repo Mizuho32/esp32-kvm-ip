@@ -76,3 +76,57 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# Bluetooth (Host role only, KVM_ROLE=HOST - ble_hid_device.c). NimBLE,
+# not Bluedroid: ESP32-S3 has no Classic BT/BR-EDR anyway, and NimBLE is
+# Espressif's own recommendation for BLE-only use cases to save memory -
+# see mds/usb_hid/2026-09-07_ble_hid_sink_plan.md. Enabling this alone
+# doesn't cost the Device role anything - the "bt"/"esp_hid" components
+# only actually get linked in where main/CMakeLists.txt's HOST role
+# PRIV_REQUIRES pulls them in (confirmed empirically: enabling these
+# Kconfig options with nothing requiring the component produces an
+# identical binary size to not enabling them at all).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# esp_hid's NimBLE HOGP backend (nimble_hidd.c) is entirely compiled out
+# without this - defaults to n upstream since most NimBLE users don't
+# need a HID *service* (as opposed to just BLE in general). Its default
+# CONFIG_BT_NIMBLE_SVC_HID_MAX_RPTS=3 already matches ble_hid_device.c's
+# 3 report IDs (keyboard/mouse/consumer), so left unset.
+CONFIG_BT_NIMBLE_HID_SERVICE=y
+
+# NimBLE's own host-stack logging (tag "NimBLE" - MODLOG_DFLT()/BLE_HS_LOG()
+# calls sprinkled through the host source and esp_hid_gap.c's vendored GAP
+# event handler alike) defaults to INFO, which prints a line for every
+# single GATT notification sent ("notify_tx event"), every "GATT procedure
+# initiated: ..." and low-level ATT ("att_...") exchange - i.e. once per
+# HID report while BLE is in use. That's both console noise and (this
+# project has already measured blocking UART console output as a real
+# latency source on this exact hot path - see
+# mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md) a likely
+# contributor to BLE motion feeling laggier than type-c/UDP. Dropping to
+# WARNING keeps real problems (encryption failures etc., which our own
+# esp_hid_gap.c logs at ESP_LOGW under the separate "ESP_HID_GAP" tag -
+# unaffected by this, since that's a plain esp_log tag/level, not
+# NimBLE's own BT_NIMBLE_LOG_LEVEL) visible while silencing the routine
+# per-report chatter.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+
+# Root cause of the reconnect-after-reset encryption-failure loop
+# (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up:
+# "encryption change event; status=7" / disconnect reason=517, looping
+# forever on every reconnection attempt after any reset). Diagnosed via
+# a temporary DEBUG-level NimBLE capture: on every failing attempt the
+# host logs "looking up our sec; peer_addr=..." immediately followed by
+# an HCI LE Long Term Key Request *Negative* Reply (ocf=0x001b) - i.e.
+# ble_store_config (NimBLE's default bond store, wired up in
+# ble_hid_device.c's ble_store_config_init() call) genuinely had no LTK
+# on file for that peer. Root cause: BT_NIMBLE_NVS_PERSIST defaults to
+# n, so that store is RAM-only and silently loses every bond on reset
+# regardless of pairing method - which is also why bumping the nvs
+# partition size and toggling sm_sc earlier both had zero effect: NVS
+# was never actually being written to in the first place. Confirmed via
+# grepping the DEBUG capture for "nvs_open_from_partition nimble_bond" -
+# it never appeared once.
+CONFIG_BT_NIMBLE_NVS_PERSIST=y

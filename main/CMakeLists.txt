@@ -28,6 +28,9 @@ if(KVM_ROLE STREQUAL "HOST")
             "power_manager.c"
             "mruby_filter.c"
             "mruby_webui.c"
+            "esp_hid_gap.c"
+            "ble_hid_device.c"
+            "mruby_ctype_shim.c"
         INCLUDE_DIRS "."
         EMBED_TXTFILES
             "mruby_scripts/default.rb"
@@ -45,6 +48,8 @@ if(KVM_ROLE STREQUAL "HOST")
             esp_http_server
             esp_hw_support
             mruby
+            bt
+            esp_hid
     )
     # esp_driver_uart (usb_host_rp2040_bridge.c's driver/uart.h), esp_timer
     # (its esp_timer.h, for esp_timer_get_time()), esp_partition
@@ -57,8 +62,36 @@ if(KVM_ROLE STREQUAL "HOST")
     # dirs propagated to this component via PRIV_REQUIRES above for reasons
     # that didn't resolve after a full clean reconfigure (esp_driver_gpio/
     # esp_driver_spi in the same list work fine) - linked explicitly
-    # instead as a workaround.
-    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart idf::esp_timer idf::esp_partition idf::esp_http_server idf::mruby)
+    # instead as a workaround. bt/esp_hid (esp_hid_gap.c/ble_hid_device.c's
+    # NimBLE headers) has the same include-propagation issue - and also
+    # needs to be listed *before* idf::mruby here (not after), or the
+    # final link command's placement of libmruby.a shifts such that it
+    # can no longer resolve against libc (undefined reference to
+    # __getreent/_ctype_ from mruby's own object files) - mruby needs to
+    # stay the last of this explicit list, same position it already had
+    # before bt/esp_hid existed.
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart idf::esp_timer idf::esp_partition idf::esp_http_server idf::bt idf::esp_hid idf::mruby)
+    # __getreent: libmruby.a ends up as the very last archive on the
+    # final link command (true even before bt/esp_hid existed) -
+    # normally harmless, since __getreent (which mruby's Prism parser
+    # needs) gets pulled from esp_libc earlier via some other
+    # force-included symbol. Adding bt/esp_hid to the mix somehow
+    # disturbs whichever earlier reference used to do that incidentally
+    # (undefined reference to __getreent appeared only once these were
+    # added) - force it in explicitly instead of relying on that
+    # incidental ordering.
+    #
+    # _ctype_: a *separate* undefined reference (mruby-sprintf gem's
+    # isspace()/isdigit()/etc., which this toolchain's ctype.h apparently
+    # expands to a classic `_ctype_[c+1]`-table lookup when mruby's own
+    # Rakefile-driven cross-compile step builds it - unlike ESP-IDF's own
+    # C files, which never hit that code path). No archive in this
+    # toolchain/esp_libc build defines `_ctype_` at all (confirmed - not
+    # even the toolchain's own libc.a), so it can't be force-included the
+    # same way - see mruby_ctype_shim.c for the actual fix (a dummy
+    # all-zero table; harmless since no script here calls Kernel#sprintf/
+    # format with anything ctype-sensitive).
+    target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,-u,__getreent")
 elseif(KVM_ROLE STREQUAL "DEVICE")
     idf_component_register(
         SRCS

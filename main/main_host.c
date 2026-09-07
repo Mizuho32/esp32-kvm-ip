@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
+#include "ble_hid_device.h"
 #include "hid_forwarder.h"
 #include "mruby_filter.h"
 #include "mruby_webui.h"
@@ -129,6 +130,16 @@ void app_main(void)
 
     mruby_filter_resolve_udp_sinks();
     mruby_filter_start_net_source();
+
+    // BLE HID output (mds/usb_hid/2026-09-07_ble_hid_sink_plan.md) - only
+    // pulled in if the script actually declared a `:ble` sink (see
+    // mruby_filter_ble_sink_declared()'s doc comment). Independent of
+    // WiFi/type-c - can run alongside either or both.
+    if (mruby_filter_ble_sink_declared()) {
+        if (ble_hid_device_start() != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to start BLE HID device (not fatal - continuing without it)");
+        }
+    }
 
     // Phase 2 (mds/usb_hid/2026-08-30_mruby_phase2_webui.md): browser-based
     // script editing, no serial/parttool.py round-trip needed.

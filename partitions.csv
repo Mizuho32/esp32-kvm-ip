@@ -24,6 +24,19 @@
 # glue HTML/CSS/JS - the syntax highlighter itself (CodeMirror) loads
 # from a CDN, not from this partition.
 #
+# nvs: bumped from the default 24K to 48K (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+# follow-up) - shared by wifi_manager.c's own BSSID/channel/IP cache
+# *and* NimBLE's bond store (LTK/IRK/CSRK/CCCD per paired PC, see
+# ble_hid_device.c) once BLE HID is in use. 24K was tight enough with
+# WiFi alone that it's a real suspect for BLE bonds silently failing to
+# persist across a reset (auth failures on reconnect). phy_init's offset
+# is now left blank (was a hardcoded 0xf000, i.e. immediately after the
+# *old* 24K-sized nvs) so gen_esp32part.py auto-places it right after
+# the bigger nvs instead of overlapping it. factory's offset moved from
+# 0x10000 to 0x20000 for the same reason (app-type partitions must stay
+# 64K-aligned, and nvs+phy_init's new combined 52K no longer fits before
+# the old 0x10000 boundary).
+#
 # wifi_cred: same raw storage scheme again, subtype 0x52, for
 # wifi_manager.c's wifi_manager_load_credentials() - written via
 # bin/upload_wifi_credentials.py (never as a compile-time constant in
@@ -38,9 +51,9 @@
 # and esptool's erase_region requires the erase size to be a multiple of
 # the 4096-byte flash sector size, same reason mrb_script/webui_html are
 # both already sector-sized.
-nvs,        data, nvs,     0x9000,  24K,
-phy_init,   data, phy,     0xf000,  4K,
-factory,    app,  factory, 0x10000, 3M,
+nvs,        data, nvs,     0x9000,  48K,
+phy_init,   data, phy,     ,        4K,
+factory,    app,  factory, 0x20000, 3M,
 mrb_script, data, 0x50,    ,        64K,
 webui_html, data, 0x51,    ,        32K,
 wifi_cred,  data, 0x52,    ,        4K,

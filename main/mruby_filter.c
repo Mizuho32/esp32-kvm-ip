@@ -20,8 +20,14 @@
 #include "mruby/compile.h"
 #include "mruby/hash.h"
 #include "mruby/string.h"
+#include "mruby/throw.h"
 
+#include "ble_hid_device.h"
 #include "hid_forwarder.h"
+// mruby_ctype_shim.c - see mruby_filter_init()'s call to
+// mruby_ctype_shim_touch() below for why. No dedicated header (single
+// call site, single tiny file) - declared here instead.
+extern void mruby_ctype_shim_touch(void);
 #include "protocol.h"
 #include "usb_device_typec.h"
 
@@ -62,7 +68,7 @@ extern const uint8_t mruby_default_script_end[]   asm("_binary_default_rb_end");
 
 enum { PIPE_KEYBOARD, PIPE_MOUSE, PIPE_CONSUMER, PIPE_KIND_COUNT };
 
-typedef enum { SINK_TYPEC, SINK_UDP } sink_kind_t;
+typedef enum { SINK_TYPEC, SINK_UDP, SINK_BLE } sink_kind_t;
 
 typedef struct {
     mrb_sym name;
@@ -179,6 +185,12 @@ static mrb_int s_wifi_reconnect_restart_after = 20;
 // until confirmed working on real hardware, unlike usb_suspend_wifi_sleep's
 // default-true.
 static bool s_usb_suspend_rp2040_sleep_enabled = false;
+// Read by main_host.c (mruby_filter.c is always compiled alongside it,
+// so no weak-symbol lookup needed here unlike power_manager.c's/
+// wifi_manager.c's) to decide whether to call ble_hid_device_start() at
+// all - see dsl_sink()'s "ble" branch and
+// mruby_filter_ble_sink_declared()'s doc comment in mruby_filter.h.
+static bool s_ble_sink_declared;
 // Read by wifi_manager.c (weak-symbol lookup, same reasoning as
 // s_wifi_reconnect_restart_after above). Defaults to false: skips
 // apply_static_ip() so every boot does a real DHCP handshake - see
@@ -206,6 +218,7 @@ static void reset_dsl_state(void)
     s_wifi_reconnect_restart_after = 20;
     s_usb_suspend_rp2040_sleep_enabled = false;
     s_wifi_fast_reconnect_static_ip_enabled = false;
+    s_ble_sink_declared = false;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -400,6 +413,19 @@ static mrb_value dsl_sink(mrb_state *mrb, mrb_value self)
         if (!mrb_nil_p(kind_v)) {
             sink->event_kind_hint = kind_from_symbol_value(mrb, kind_v, "sink");
         }
+    } else if (strcmp(type_name, "ble") == 0) {
+        // main_host.c only starts ble_hid_device.c (NimBLE/esp_hid,
+        // pulled in only if declared - see
+        // mruby_filter_ble_sink_declared()) at all if *some* script
+        // declares a :ble sink - same opt-in-by-declaration pattern as
+        // :udp, no separate boolean toggle. See
+        // mds/usb_hid/2026-09-07_ble_hid_sink_plan.md.
+        sink->kind = SINK_BLE;
+        s_ble_sink_declared = true;
+        mrb_value kind_v = dsl_opt(mrb, opts, "kind");
+        if (!mrb_nil_p(kind_v)) {
+            sink->event_kind_hint = kind_from_symbol_value(mrb, kind_v, "sink");
+        }
     } else if (strcmp(type_name, "udp") == 0) {
         sink->kind = SINK_UDP;
         mrb_value host_v = dsl_opt(mrb, opts, "host");
@@ -424,7 +450,7 @@ static mrb_value dsl_sink(mrb_state *mrb, mrb_value self)
         sink->udp_port = (int)mrb_fixnum(port_v);
         sink->udp_resolved = false;
     } else {
-        mrb_raisef(mrb, E_ARGUMENT_ERROR, "sink: unsupported type :%s (only :typec/:udp are implemented)", type_name);
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "sink: unsupported type :%s (only :typec/:udp/:ble are implemented)", type_name);
     }
 
     s_sink_count++;
@@ -737,6 +763,16 @@ static void define_dsl_methods(mrb_state *mrb)
 
 void mruby_filter_init(void)
 {
+    // See mruby_ctype_shim.c's mruby_ctype_shim_touch() doc comment - a
+    // real reference, not a linker force-flag, is what gets that
+    // translation unit's `_ctype_` definition pulled out of libmain.a
+    // early enough in the link for libmruby.a's sprintf.o (linked
+    // dead-last) to resolve against it later. Placed before the
+    // CONFIG_MRUBY_FILTER_ROUTE_ENABLE check below - idf::mruby is
+    // linked unconditionally regardless of that Kconfig option, so this
+    // needs to run regardless too.
+    mruby_ctype_shim_touch();
+
 #if !CONFIG_MRUBY_FILTER_ROUTE_ENABLE
     ESP_LOGI(TAG, "CONFIG_MRUBY_FILTER_ROUTE_ENABLE off - using C filter_rules.h/route_rules.h");
     return;
@@ -850,6 +886,11 @@ bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void)
     return s_wifi_fast_reconnect_static_ip_enabled;
 }
 
+bool mruby_filter_ble_sink_declared(void)
+{
+    return s_ble_sink_declared;
+}
+
 // Resolves every :udp sink's host/port (getaddrinfo()) - deferred out of
 // dsl_sink()/mruby_filter_init() because lwIP's TCP/IP thread isn't up
 // yet at that point (mruby_filter_init() runs before wifi_manager_init()
@@ -913,6 +954,8 @@ static void send_keyboard_to_sink(sink_def_t *sink, uint8_t modifiers, const uin
 {
     if (sink->kind == SINK_TYPEC) {
         usb_device_typec_keyboard_report(modifiers, keycodes);
+    } else if (sink->kind == SINK_BLE) {
+        ble_hid_device_keyboard_report(modifiers, keycodes);
     } else if (sink->udp_resolved) {
         hid_forwarder_send_keyboard_to(&sink->udp_addr, modifiers, keycodes);
     }
@@ -922,30 +965,57 @@ static void dispatch_keyboard_via(pipeline_t *p, uint8_t modifiers, const uint8_
 {
     int ai = mrb_gc_arena_save(s_mrb);
 
-    for (int i = 0; i < p->to_count; i++) {
-        to_stage_t *stage = &p->to[i];
-        if (mrb_nil_p(stage->block)) {
-            send_keyboard_to_sink(stage->sink, modifiers, keycodes);
-            continue;
+    // Wrap the whole per-report sequence - not just invoke_block()'s user
+    // script call - in mruby's own protected-call idiom (the same
+    // MRB_TRY/MRB_CATCH mrb_core_init_protect() in error.c uses). This is
+    // the hot path: it runs on every keyboard report, from the USB bridge
+    // task, so a transient allocation failure here (build_keyboard_event()
+    // allocating the event Hash - now more likely to actually happen with
+    // BLE/NimBLE's own runtime SRAM footprint added in, see
+    // mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up, which is
+    // exactly how this was found: the board rebooted mid-use, not just on
+    // a WebUI script upload) is not just a script bug invoke_block()'s own
+    // mrb_funcall_argv() protection would catch - build_keyboard_event()
+    // itself runs *before* invoke_block() and outside any protection, so an
+    // exception raised there hits mruby's exc_throw() with mrb->jmp still
+    // NULL, which aborts the whole process. Catching it here instead just
+    // drops this one report's remaining stages.
+    struct mrb_jmpbuf *prev_jmp = s_mrb->jmp;
+    struct mrb_jmpbuf c_jmp;
+
+    MRB_TRY(&c_jmp) {
+        s_mrb->jmp = &c_jmp;
+
+        for (int i = 0; i < p->to_count; i++) {
+            to_stage_t *stage = &p->to[i];
+            if (mrb_nil_p(stage->block)) {
+                send_keyboard_to_sink(stage->sink, modifiers, keycodes);
+                continue;
+            }
+            mrb_value ev = build_keyboard_event(s_mrb, modifiers, keycodes);
+            mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
+            if (check_error() || mrb_nil_p(ret)) {
+                continue; // script bug or explicit drop - skip this stage's sink this report
+            }
+            uint8_t o_modifiers = (uint8_t)dsl_hget_int(s_mrb, ev, "modifiers", modifiers);
+            uint8_t o_keycodes[6];
+            read_keycodes(s_mrb, ev, o_keycodes, keycodes);
+            send_keyboard_to_sink(stage->sink, o_modifiers, o_keycodes);
         }
-        mrb_value ev = build_keyboard_event(s_mrb, modifiers, keycodes);
-        mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
-        if (check_error() || mrb_nil_p(ret)) {
-            continue; // script bug or explicit drop - skip this stage's sink this report
+        for (int i = 0; i < p->branch_count; i++) {
+            branch_stage_t *stage = &p->branch[i];
+            mrb_value ev = build_keyboard_event(s_mrb, modifiers, keycodes); // always raw - see design doc
+            mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
+            if (!check_error() && mrb_test(ret)) {
+                send_keyboard_to_sink(stage->sink, modifiers, keycodes);
+            }
         }
-        uint8_t o_modifiers = (uint8_t)dsl_hget_int(s_mrb, ev, "modifiers", modifiers);
-        uint8_t o_keycodes[6];
-        read_keycodes(s_mrb, ev, o_keycodes, keycodes);
-        send_keyboard_to_sink(stage->sink, o_modifiers, o_keycodes);
-    }
-    for (int i = 0; i < p->branch_count; i++) {
-        branch_stage_t *stage = &p->branch[i];
-        mrb_value ev = build_keyboard_event(s_mrb, modifiers, keycodes); // always raw - see design doc
-        mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
-        if (!check_error() && mrb_test(ret)) {
-            send_keyboard_to_sink(stage->sink, modifiers, keycodes);
-        }
-    }
+
+        s_mrb->jmp = prev_jmp;
+    } MRB_CATCH(&c_jmp) {
+        s_mrb->jmp = prev_jmp;
+        check_error(); // logs+clears s_mrb->exc if the escaped exception left one set
+    } MRB_END_EXC(&c_jmp);
 
     mrb_gc_arena_restore(s_mrb, ai);
 }
@@ -981,6 +1051,8 @@ static void send_mouse_to_sink(sink_def_t *sink, uint8_t buttons, int16_t dx, in
 {
     if (sink->kind == SINK_TYPEC) {
         usb_device_typec_mouse_report(buttons, dx, dy, wheel, pan);
+    } else if (sink->kind == SINK_BLE) {
+        ble_hid_device_mouse_report(buttons, dx, dy, wheel, pan);
     } else if (sink->udp_resolved) {
         hid_forwarder_send_mouse_to(&sink->udp_addr, buttons, dx, dy, wheel, pan);
     }
@@ -990,32 +1062,48 @@ static void dispatch_mouse_via(pipeline_t *p, uint8_t buttons, int16_t dx, int16
 {
     int ai = mrb_gc_arena_save(s_mrb);
 
-    for (int i = 0; i < p->to_count; i++) {
-        to_stage_t *stage = &p->to[i];
-        if (mrb_nil_p(stage->block)) {
-            send_mouse_to_sink(stage->sink, buttons, dx, dy, wheel, pan);
-            continue;
+    // See dispatch_keyboard_via()'s comment - same reasoning, and this is
+    // the function whose unprotected build_mouse_event() call was
+    // reproduced crashing the board mid-use (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+    // follow-up).
+    struct mrb_jmpbuf *prev_jmp = s_mrb->jmp;
+    struct mrb_jmpbuf c_jmp;
+
+    MRB_TRY(&c_jmp) {
+        s_mrb->jmp = &c_jmp;
+
+        for (int i = 0; i < p->to_count; i++) {
+            to_stage_t *stage = &p->to[i];
+            if (mrb_nil_p(stage->block)) {
+                send_mouse_to_sink(stage->sink, buttons, dx, dy, wheel, pan);
+                continue;
+            }
+            mrb_value ev = build_mouse_event(s_mrb, buttons, dx, dy, wheel, pan);
+            mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
+            if (check_error() || mrb_nil_p(ret)) {
+                continue;
+            }
+            uint8_t o_buttons = (uint8_t)dsl_hget_int(s_mrb, ev, "buttons", buttons);
+            int16_t o_dx      = (int16_t)dsl_hget_int(s_mrb, ev, "dx", dx);
+            int16_t o_dy      = (int16_t)dsl_hget_int(s_mrb, ev, "dy", dy);
+            int8_t o_wheel    = (int8_t)dsl_hget_int(s_mrb, ev, "wheel", wheel);
+            int8_t o_pan      = (int8_t)dsl_hget_int(s_mrb, ev, "pan", pan);
+            send_mouse_to_sink(stage->sink, o_buttons, o_dx, o_dy, o_wheel, o_pan);
         }
-        mrb_value ev = build_mouse_event(s_mrb, buttons, dx, dy, wheel, pan);
-        mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
-        if (check_error() || mrb_nil_p(ret)) {
-            continue;
+        for (int i = 0; i < p->branch_count; i++) {
+            branch_stage_t *stage = &p->branch[i];
+            mrb_value ev = build_mouse_event(s_mrb, buttons, dx, dy, wheel, pan); // always raw
+            mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
+            if (!check_error() && mrb_test(ret)) {
+                send_mouse_to_sink(stage->sink, buttons, dx, dy, wheel, pan);
+            }
         }
-        uint8_t o_buttons = (uint8_t)dsl_hget_int(s_mrb, ev, "buttons", buttons);
-        int16_t o_dx      = (int16_t)dsl_hget_int(s_mrb, ev, "dx", dx);
-        int16_t o_dy      = (int16_t)dsl_hget_int(s_mrb, ev, "dy", dy);
-        int8_t o_wheel    = (int8_t)dsl_hget_int(s_mrb, ev, "wheel", wheel);
-        int8_t o_pan      = (int8_t)dsl_hget_int(s_mrb, ev, "pan", pan);
-        send_mouse_to_sink(stage->sink, o_buttons, o_dx, o_dy, o_wheel, o_pan);
-    }
-    for (int i = 0; i < p->branch_count; i++) {
-        branch_stage_t *stage = &p->branch[i];
-        mrb_value ev = build_mouse_event(s_mrb, buttons, dx, dy, wheel, pan); // always raw
-        mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
-        if (!check_error() && mrb_test(ret)) {
-            send_mouse_to_sink(stage->sink, buttons, dx, dy, wheel, pan);
-        }
-    }
+
+        s_mrb->jmp = prev_jmp;
+    } MRB_CATCH(&c_jmp) {
+        s_mrb->jmp = prev_jmp;
+        check_error();
+    } MRB_END_EXC(&c_jmp);
 
     mrb_gc_arena_restore(s_mrb, ai);
 }
@@ -1074,6 +1162,8 @@ static void send_consumer_to_sink(sink_def_t *sink, uint16_t usage_id)
 {
     if (sink->kind == SINK_TYPEC) {
         usb_device_typec_consumer_report(usage_id);
+    } else if (sink->kind == SINK_BLE) {
+        ble_hid_device_consumer_report(usage_id);
     } else if (sink->udp_resolved) {
         hid_forwarder_send_consumer_to(&sink->udp_addr, usage_id);
     }
@@ -1083,28 +1173,41 @@ static void dispatch_consumer_via(pipeline_t *p, uint16_t usage_id)
 {
     int ai = mrb_gc_arena_save(s_mrb);
 
-    for (int i = 0; i < p->to_count; i++) {
-        to_stage_t *stage = &p->to[i];
-        if (mrb_nil_p(stage->block)) {
-            send_consumer_to_sink(stage->sink, usage_id);
-            continue;
+    // See dispatch_keyboard_via()'s comment - same reasoning.
+    struct mrb_jmpbuf *prev_jmp = s_mrb->jmp;
+    struct mrb_jmpbuf c_jmp;
+
+    MRB_TRY(&c_jmp) {
+        s_mrb->jmp = &c_jmp;
+
+        for (int i = 0; i < p->to_count; i++) {
+            to_stage_t *stage = &p->to[i];
+            if (mrb_nil_p(stage->block)) {
+                send_consumer_to_sink(stage->sink, usage_id);
+                continue;
+            }
+            mrb_value ev = build_consumer_event(s_mrb, usage_id);
+            mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
+            if (check_error() || mrb_nil_p(ret)) {
+                continue;
+            }
+            uint16_t o_usage_id = (uint16_t)dsl_hget_int(s_mrb, ev, "usage_id", usage_id);
+            send_consumer_to_sink(stage->sink, o_usage_id);
         }
-        mrb_value ev = build_consumer_event(s_mrb, usage_id);
-        mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
-        if (check_error() || mrb_nil_p(ret)) {
-            continue;
+        for (int i = 0; i < p->branch_count; i++) {
+            branch_stage_t *stage = &p->branch[i];
+            mrb_value ev = build_consumer_event(s_mrb, usage_id);
+            mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
+            if (!check_error() && mrb_test(ret)) {
+                send_consumer_to_sink(stage->sink, usage_id);
+            }
         }
-        uint16_t o_usage_id = (uint16_t)dsl_hget_int(s_mrb, ev, "usage_id", usage_id);
-        send_consumer_to_sink(stage->sink, o_usage_id);
-    }
-    for (int i = 0; i < p->branch_count; i++) {
-        branch_stage_t *stage = &p->branch[i];
-        mrb_value ev = build_consumer_event(s_mrb, usage_id);
-        mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
-        if (!check_error() && mrb_test(ret)) {
-            send_consumer_to_sink(stage->sink, usage_id);
-        }
-    }
+
+        s_mrb->jmp = prev_jmp;
+    } MRB_CATCH(&c_jmp) {
+        s_mrb->jmp = prev_jmp;
+        check_error();
+    } MRB_END_EXC(&c_jmp);
 
     mrb_gc_arena_restore(s_mrb, ai);
 }
@@ -1313,9 +1416,42 @@ bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, si
         return true;
     }
 
-    mrb_ccontext *cxt = mrb_ccontext_new(tmp);
-    struct mrb_parser_state *p = mrb_parse_nstring(tmp, script, len, cxt);
-    bool ok = (p != NULL && p->nerr == 0);
+    // mrb_parse_nstring() runs the Prism parser+codegen (see the big comment
+    // above) directly on this C call stack, with no mrb_top_run()/
+    // mrb_protect() above it in the call chain - so tmp->jmp is NULL here.
+    // A script that runs the parser out of memory (a real risk: this
+    // WebUI upload path takes arbitrary not-yet-trusted script text, and
+    // Prism's AST/codegen allocations for a large or deeply-nested script
+    // can outgrow whatever's left of internal SRAM once BLE/NimBLE's own
+    // runtime footprint is added in - see mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+    // follow-up, this is exactly how a `mruby save` from the WebUI once
+    // rebooted the board) raises NoMemoryError; mruby's exc_throw() falls
+    // straight through to abort() whenever mrb->jmp is NULL, taking the
+    // whole device down instead of just failing this one syntax check.
+    // Wrap the parse in the same MRB_TRY/MRB_CATCH pattern mruby's own
+    // mrb_core_init_protect() (error.c) uses, so *any* exception raised
+    // during parsing - out-of-memory or otherwise - unwinds back here via
+    // a normal longjmp instead of reaching abort().
+    struct mrb_jmpbuf *prev_jmp = tmp->jmp;
+    struct mrb_jmpbuf c_jmp;
+    // volatile: written inside MRB_TRY, read after a possible longjmp out
+    // of it via MRB_CATCH - same reason mruby's own mrb_core_init_protect()
+    // (error.c) declares its "err" local volatile.
+    mrb_ccontext *volatile cxt = NULL;
+    struct mrb_parser_state *volatile p = NULL;
+    volatile bool ok = false;
+
+    MRB_TRY(&c_jmp) {
+        tmp->jmp = &c_jmp;
+        cxt = mrb_ccontext_new(tmp);
+        p = mrb_parse_nstring(tmp, script, len, cxt);
+        tmp->jmp = prev_jmp;
+        ok = (p != NULL && p->nerr == 0 && tmp->exc == NULL);
+    } MRB_CATCH(&c_jmp) {
+        tmp->jmp = prev_jmp;
+        ok = false;
+    } MRB_END_EXC(&c_jmp);
+
     if (!ok && err_buf != NULL && err_buf_size > 0) {
         if (p != NULL && p->nerr > 0) {
             snprintf(err_buf, err_buf_size, "line %u: %s",
@@ -1327,7 +1463,9 @@ bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, si
     if (p != NULL) {
         mrb_parser_free(p);
     }
-    mrb_ccontext_free(tmp, cxt);
+    if (cxt != NULL) {
+        mrb_ccontext_free(tmp, cxt);
+    }
     mrb_close(tmp);
     return ok;
 }

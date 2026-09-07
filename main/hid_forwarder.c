@@ -177,11 +177,28 @@ static void dispatch_merged_keyboard_report(void)
     uint8_t keycodes[6];
     compute_merged_keyboard_report(&modifiers, keycodes);
 
+    if (mruby_filter_active()) {
+        // mruby's :keyboard pipeline owns every sink itself (typec/udp/ble -
+        // see mds/usb_hid/2026-09-07_ble_hid_sink_plan.md) and has nothing
+        // to do with whether type-c happens to be connected to a real PC
+        // right now - a :udp or :ble-only sink shouldn't depend on it at
+        // all. This used to be nested inside the usb_device_typec_connected()
+        // branch below (a leftover from the pre-mruby design, where
+        // type-c was the only sink that ever existed), which silently
+        // skipped the whole pipeline - and so any UDP/BLE sink too -
+        // whenever type-c was "power only" (plugged in but not enumerated
+        // by a PC) or not connected at all. Found via
+        // mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up: BLE
+        // reports only ever went out while also enumerated to a PC over
+        // type-c. usb_device_typec_keyboard_report() itself stays a safe,
+        // immediate no-op when disconnected (wait_for_ready() bails out
+        // without blocking), so calling into the pipeline unconditionally
+        // costs nothing extra for a typec-routed script either.
+        mruby_dispatch_keyboard(modifiers, keycodes);
+        return;
+    }
+
     if (usb_device_typec_connected()) {
-        if (mruby_filter_active()) {
-            mruby_dispatch_keyboard(modifiers, keycodes);
-            return;
-        }
         usb_device_typec_keyboard_report(modifiers, keycodes);
         if (!route_keyboard_also_udp(modifiers, keycodes)) {
             return;
@@ -230,29 +247,29 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
     uint8_t synth_modifiers = 0;
     uint8_t synth_keycode = HID_KEY_NO_PRESS;
 
-    if (usb_device_typec_connected()) {
-        if (mruby_filter_active()) {
-            // mruby_dispatch_mouse() owns every sink (typec and any named
-            // UDP sinks) via the :mouse pipeline's to/branch stages, and
-            // fills synth_modifiers/synth_keycode via the script's optional
-            // mouse_synth_keys hook (see mds/usb_hid/2026-08-29_mruby_phase1_impl.md).
-            mruby_dispatch_mouse(buttons, dx, dy, wheel, pan, &synth_modifiers, &synth_keycode);
-        } else {
-            // Split (rough, kept for the C fallback path): filter_rules.h
-            // only shapes the type-c-bound copy; route_rules.h/UDP always
-            // see the original raw values, never the filtered ones - see
-            // mds/usb_hid/2026-08-21_filter_conv_route.md.
-            uint8_t f_buttons = buttons;
-            int16_t f_dx = dx, f_dy = dy;
-            int8_t f_wheel = wheel, f_pan = pan;
-            bool forward_typec = filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
-                                                      &synth_modifiers, &synth_keycode);
-            if (forward_typec) {
-                usb_device_typec_mouse_report(f_buttons, f_dx, f_dy, f_wheel, f_pan);
-            }
-            if (route_mouse_also_udp(buttons, dx, dy, wheel, pan)) {
-                send_mouse_report_raw(buttons, dx, dy, wheel, pan);
-            }
+    if (mruby_filter_active()) {
+        // mruby_dispatch_mouse() owns every sink (typec and any named
+        // UDP/BLE sinks) via the :mouse pipeline's to/branch stages, and
+        // fills synth_modifiers/synth_keycode via the script's optional
+        // mouse_synth_keys hook (see mds/usb_hid/2026-08-29_mruby_phase1_impl.md).
+        // See dispatch_merged_keyboard_report()'s comment - this no longer
+        // depends on usb_device_typec_connected() for the same reason.
+        mruby_dispatch_mouse(buttons, dx, dy, wheel, pan, &synth_modifiers, &synth_keycode);
+    } else if (usb_device_typec_connected()) {
+        // Split (rough, kept for the C fallback path): filter_rules.h
+        // only shapes the type-c-bound copy; route_rules.h/UDP always
+        // see the original raw values, never the filtered ones - see
+        // mds/usb_hid/2026-08-21_filter_conv_route.md.
+        uint8_t f_buttons = buttons;
+        int16_t f_dx = dx, f_dy = dy;
+        int8_t f_wheel = wheel, f_pan = pan;
+        bool forward_typec = filter_mouse_report(&f_buttons, &f_dx, &f_dy, &f_wheel, &f_pan,
+                                                  &synth_modifiers, &synth_keycode);
+        if (forward_typec) {
+            usb_device_typec_mouse_report(f_buttons, f_dx, f_dy, f_wheel, f_pan);
+        }
+        if (route_mouse_also_udp(buttons, dx, dy, wheel, pan)) {
+            send_mouse_report_raw(buttons, dx, dy, wheel, pan);
         }
     } else {
         send_mouse_report_raw(buttons, dx, dy, wheel, pan);
@@ -262,11 +279,13 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
 
 void hid_forwarder_consumer(uint16_t usage_id)
 {
+    // See dispatch_merged_keyboard_report()'s comment - same reasoning.
+    if (mruby_filter_active()) {
+        mruby_dispatch_consumer(usage_id);
+        return;
+    }
+
     if (usb_device_typec_connected()) {
-        if (mruby_filter_active()) {
-            mruby_dispatch_consumer(usage_id);
-            return;
-        }
         usb_device_typec_consumer_report(usage_id);
         if (!route_consumer_also_udp(usage_id)) {
             return;
