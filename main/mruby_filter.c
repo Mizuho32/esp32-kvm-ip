@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 
@@ -1435,7 +1436,19 @@ bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, si
         // to pre-check it. mrb_open_core() can return non-NULL with ->exc
         // set on a failed core init (unlike a flat NULL on allocation
         // failure) - both need the same "can't verify" fallback.
-        ESP_LOGW(TAG, "mruby_filter_check_syntax: mrb_open_core() failed, skipping check");
+        //
+        // Heap region dump here too (not just the parse-failure branch
+        // below) - real-hardware reports of intermittent "parse failed (out
+        // of memory?)" (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+        // follow-up) point at internal SRAM (mruby's allocator here is
+        // plain malloc()/realloc(), see mrb_basic_alloc_func() in mruby's
+        // state.c - this board's PSRAM is only wired up for explicit
+        // heap_caps_malloc(MALLOC_CAP_SPIRAM) callers, not plain malloc(),
+        // so this throwaway VM competes directly with WiFi/lwIP/NimBLE's
+        // own internal-SRAM buffers) being tight enough that even
+        // mrb_open_core() itself can't find room.
+        ESP_LOGW(TAG, "mruby_filter_check_syntax: mrb_open_core() failed, skipping check - internal heap region dump follows");
+        heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (tmp != NULL) {
             mrb_close(tmp);
         }
@@ -1484,6 +1497,22 @@ bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, si
                      p->error_buffer[0].lineno, p->error_buffer[0].message);
         } else {
             snprintf(err_buf, err_buf_size, "parse failed (out of memory?)");
+            // See the heap-stats comment on the mrb_open_core() failure
+            // branch above - this is the branch real hardware has actually
+            // hit (MRB_CATCH above, i.e. a NoMemoryError raised mid-parse/
+            // codegen). Trimming NimBLE's own Kconfig footprint (role/
+            // connection-count/MTU/unused-GATT-services, see
+            // sdkconfig.defaults) measurably raised *total* internal free
+            // bytes but left the *largest contiguous block* completely
+            // unchanged on real hardware (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+            // follow-up) - i.e. something other than NimBLE's own
+            // allocations is capping the biggest single hole available.
+            // heap_caps_print_heap_info() dumps every registered internal
+            // heap *region* separately (address/len/free/largest per
+            // region, not just the aggregate) - which region the cap lives
+            // in narrows down what's actually responsible.
+            ESP_LOGW(TAG, "mruby_filter_check_syntax: parse/codegen failed - internal heap region dump follows");
+            heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         }
     }
     if (p != NULL) {

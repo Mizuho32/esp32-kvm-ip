@@ -1,9 +1,11 @@
 #include "wifi_manager.h"
 
+#include <inttypes.h>
 #include <string.h>
 #include "freertos/event_groups.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_partition.h"
@@ -247,7 +249,18 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        // Internal-SRAM stats logged here too (not just an isolated debug
+        // print) - this is the "reconnect fully settled" bookend for the
+        // ble_hid_device.c's DISCONNECT_EVENT log (right when
+        // wifi_manager_resume()/esp_wifi_start() *starts* the reconnect,
+        // still asynchronous at that point) - comparing the two pins down
+        // whether a WebUI save's "parse failed (out of memory?)" (see
+        // mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up) is a
+        // transient dip during STA reconnect/DHCP or a lasting one.
+        ESP_LOGI(TAG, "Got IP: " IPSTR " (internal free=%" PRIu32 " largest block=%" PRIu32 ")",
+                 IP2STR(&event->ip_info.ip),
+                 (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         status_led_set(true); // also stops the connecting-blink, if it was still running
         s_ever_connected = true;
         s_retry_num = 0;

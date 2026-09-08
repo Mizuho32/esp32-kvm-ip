@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "esp_coexist.h"
+#include "esp_heap_caps.h"
 #include "esp_hidd.h"
 #include "esp_hid_gap.h"
 #include "esp_log.h"
@@ -244,7 +245,19 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "wifi_manager_resume() failed: %s", esp_err_to_name(err));
             } else {
-                ESP_LOGI(TAG, "ble_wifi_off_while_connected: WiFi resumed - WebUI reachable again");
+                // Internal-SRAM stats here are the "reconnect just kicked
+                // off" bookend - esp_wifi_start() returning doesn't mean
+                // the STA reconnect/DHCP handshake is done yet (that's
+                // still async), so this is the *start* of whatever
+                // transient dip wifi_manager.c's IP_EVENT_STA_GOT_IP log
+                // captures the end of. See that log's comment and
+                // mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up
+                // (a WebUI save's "parse failed (out of memory?)" seen
+                // shortly after this point in real testing).
+                ESP_LOGI(TAG, "ble_wifi_off_while_connected: WiFi resumed - WebUI reachable again "
+                         "(internal free=%" PRIu32 " largest block=%" PRIu32 ")",
+                         (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                         (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
             }
         }
 

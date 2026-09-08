@@ -130,3 +130,72 @@ CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 # grepping the DEBUG capture for "nvs_open_from_partition nimble_bond" -
 # it never appeared once.
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
+# Trim NimBLE's internal-SRAM footprint to what this device actually uses.
+# Real-hardware measurement (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+# follow-up) found the largest contiguous internal-SRAM free block drops
+# from 61440 bytes (BLE disabled) to as low as 17408 bytes just from
+# ble_hid_device_start() running - *before* any PC ever connects - tight
+# enough that the WebUI's syntax-check throwaway mrb_state (mruby_filter.c's
+# mruby_filter_check_syntax(), a whole separate Prism parse+codegen pass)
+# can fail with NoMemoryError. None of these settings were ever explicitly
+# chosen before - they're all upstream NimBLE example/menuconfig defaults,
+# sized generously for use cases this project doesn't have.
+#
+# - This device is BLE-peripheral-only: it advertises and accepts one
+#   incoming connection from the target PC, and never scans, never
+#   initiates its own outgoing connections, and never broadcasts anything
+#   besides its own connectable advertisement. Central/Broadcaster/Observer
+#   role support (all default y upstream) pulls in host-side state this
+#   project's esp_hid_gap.c/ble_hid_device.c never call into.
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+
+# - Only one BLE central (the target PC) is ever connected at a time
+#   (mds/usb_hid/2026-09-07_ble_hid_sink_plan.md's single-PC MVP) - the
+#   upstream default of 3 reserves per-connection GATT/L2CAP/security
+#   state for two connections this device can never actually use
+#   simultaneously. Unrelated to CONFIG_BT_NIMBLE_MAX_BONDS (still 3,
+#   above) - that one's about how many *bonds* are remembered across
+#   reboots, not simultaneous live connections, and multiple PCs bonding
+#   in turn already works fine without raising this.
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+
+# - HID reports here are tiny (<=8 bytes - see ble_hid_device.h's report
+#   layouts, well under the 20-byte usable payload a bare 23-byte ATT_MTU
+#   already gives a notification) - no characteristic this device exposes
+#   needs anywhere near the upstream default 256-byte preferred MTU, which
+#   reserves a 256-byte buffer per direction per connection. 23
+#   (BLE_ATT_MTU_DFLT, confirmed in nimble's ble_att.c as the actual
+#   protocol-mandated floor ble_att_set_preferred_mtu() enforces) means no
+#   MTU exchange is even needed.
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=23
+
+# - "Prepare Write"/"Execute Write" queuing is only ever used for
+#   characteristic writes longer than one ATT MTU - nothing in this HID
+#   service's report characteristics is ever written by the peer at all
+#   (Input Report, notify-only), so the upstream default of 64 queued
+#   prepare-write entries is pure dead weight here.
+CONFIG_BT_NIMBLE_ATT_MAX_PREP_ENTRIES=1
+
+# - Unused example GATT profile services this project's HOGP device never
+#   declares or references: Proximity, Alert Notification, Current Time,
+#   Health Thermometer, Internet Protocol Support, Tx Power, Immediate
+#   Alert, Link Loss, Heart Rate. Left enabled: GAP/BAS/DIS/SPS - despite
+#   its name, "Serial Port Service" (SPS) has nothing to do with this
+#   project's own serial console; esp_hid's NimBLE backend
+#   (components/esp_hid/src/nimble_hidd.c) unconditionally calls
+#   ble_svc_gap_init()/_bas_init()/_dis_init()/_sps_init() itself (a build
+#   error - "undefined reference to ble_svc_sps_init" - is what caught
+#   this dependency), so all four (plus HID itself) have to stay on
+#   regardless of whether this project's own code ever touches them.
+CONFIG_BT_NIMBLE_PROX_SERVICE=n
+CONFIG_BT_NIMBLE_ANS_SERVICE=n
+CONFIG_BT_NIMBLE_CTS_SERVICE=n
+CONFIG_BT_NIMBLE_HTP_SERVICE=n
+CONFIG_BT_NIMBLE_IPSS_SERVICE=n
+CONFIG_BT_NIMBLE_TPS_SERVICE=n
+CONFIG_BT_NIMBLE_IAS_SERVICE=n
+CONFIG_BT_NIMBLE_LLS_SERVICE=n
+CONFIG_BT_NIMBLE_HR_SERVICE=n
