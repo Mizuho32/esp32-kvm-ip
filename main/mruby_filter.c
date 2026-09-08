@@ -197,6 +197,12 @@ static bool s_ble_sink_declared;
 // mruby_filter_wifi_fast_reconnect_static_ip_enabled()'s doc comment in
 // mruby_filter.h for why that's the safer default.
 static bool s_wifi_fast_reconnect_static_ip_enabled = false;
+// Read by ble_hid_device.c (mruby_filter.c is always compiled alongside
+// it, no weak-symbol lookup needed here - same reasoning as
+// s_ble_sink_declared above). Defaults to false (opt-in) - see
+// mruby_filter_ble_wifi_off_while_connected()'s doc comment in
+// mruby_filter.h for the tradeoff this makes.
+static bool s_ble_wifi_off_while_connected = false;
 
 static void reset_dsl_state(void)
 {
@@ -219,6 +225,7 @@ static void reset_dsl_state(void)
     s_usb_suspend_rp2040_sleep_enabled = false;
     s_wifi_fast_reconnect_static_ip_enabled = false;
     s_ble_sink_declared = false;
+    s_ble_wifi_off_while_connected = false;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -658,6 +665,19 @@ static mrb_value ruby_wifi_fast_reconnect_static_ip(mrb_state *mrb, mrb_value se
     return mrb_nil_value();
 }
 
+// `ble_wifi_off_while_connected true` - see
+// mruby_filter_ble_wifi_off_while_connected()'s doc comment in
+// mruby_filter.h. Default false (WiFi/WebUI stay up regardless of BLE
+// connection state).
+static mrb_value ruby_ble_wifi_off_while_connected(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_bool enabled;
+    mrb_get_args(mrb, "b", &enabled);
+    s_ble_wifi_off_while_connected = enabled;
+    return mrb_nil_value();
+}
+
 // ---- script loading -----------------------------------------------------
 
 // Finds the mrb_script partition and reads/validates just its 4-byte
@@ -751,6 +771,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "wifi_reconnect_restart_after", ruby_wifi_reconnect_restart_after, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "usb_suspend_rp2040_sleep", ruby_usb_suspend_rp2040_sleep, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "wifi_fast_reconnect_static_ip", ruby_wifi_fast_reconnect_static_ip, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
@@ -889,6 +910,11 @@ bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void)
 bool mruby_filter_ble_sink_declared(void)
 {
     return s_ble_sink_declared;
+}
+
+bool mruby_filter_ble_wifi_off_while_connected(void)
+{
+    return s_ble_wifi_off_while_connected;
 }
 
 // Resolves every :udp sink's host/port (getaddrinfo()) - deferred out of

@@ -38,6 +38,21 @@
 // subsystems themselves rather than just their logging.
 #define HOST_MINIMAL_TEST 0
 
+// EXPERIMENTAL performance-isolation toggle (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+// follow-up) - a BLE-focused sibling of HOST_MINIMAL_TEST above: skips
+// WiFi/mruby_filter_init()/WebUI/type-c/power_manager entirely and starts
+// BLE HID unconditionally (no mruby DSL running, so there's no `:ble`
+// sink declaration to gate on) alongside whichever USB Host backend is
+// probed. Only the RP2040 bridge (UART USB Host) is exercised here - see
+// try_rp2040_bridge() below - since that's this project's actual target
+// hardware backend; MAX3421E/native-OTG paths are skipped for simplicity.
+// Must be flipped together with hid_forwarder.c's matching
+// HOST_BLE_ONLY_TEST, which is what actually routes every keyboard/
+// mouse/consumer report straight to ble_hid_device_*_report(), bypassing
+// mruby/UDP/type-c per-report (this toggle alone only controls what
+// app_main() brings up at boot, not the per-report dispatch path).
+#define HOST_BLE_ONLY_TEST 0
+
 // Each returns true if that backend was actually detected/started (and
 // hard-restarts on a detected-but-failed-to-start error, same as before -
 // these are just the probe+start pairs factored out so both the
@@ -96,6 +111,27 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized");
+
+#if HOST_BLE_ONLY_TEST
+    // See this toggle's definition above - BLE + RP2040 bridge only,
+    // nothing else. NVS is still needed (NimBLE's bond store,
+    // CONFIG_BT_NIMBLE_NVS_PERSIST - see mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+    // follow-up), which is why it's initialized above regardless.
+    ESP_LOGW(TAG, "HOST_BLE_ONLY_TEST: BLE + RP2040 bridge only - no WiFi/mruby/WebUI/type-c");
+    if (ble_hid_device_start() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start BLE HID device. Restarting in 5s...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_restart();
+    }
+    if (!try_rp2040_bridge()) {
+        ESP_LOGE(TAG, "RP2040 bridge not detected - HOST_BLE_ONLY_TEST requires it. Restarting in 5s...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_restart();
+    }
+    status_led_set(true);
+    ESP_LOGI(TAG, "HOST_BLE_ONLY_TEST ready - BLE + RP2040 bridge running standalone");
+    return;
+#endif
 
     // Must run before wifi_manager_start() - the script's `hostname "..."`
     // call (if any) needs to have been evaluated before the netif is set

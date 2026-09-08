@@ -12,6 +12,7 @@
 #include <inttypes.h>
 #include <string.h>
 
+#include "esp_coexist.h"
 #include "esp_hidd.h"
 #include "esp_hid_gap.h"
 #include "esp_log.h"
@@ -19,8 +20,14 @@
 #include "host/ble_gap.h"
 #include "host/ble_hs.h"
 #include "host/ble_store.h"
+#include "nimble/ble.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+
+#include "esp_timer.h"
+
+#include "mruby_filter.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "BLE_HID";
 
@@ -155,6 +162,29 @@ static bool s_started;
 // disconnect.
 static void ble_hid_mouse_pending_reset(void);
 
+// How long to hold off re-advertising after a *deliberate* disconnect
+// (see hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case) before
+// letting the peer reconnect again. Most OSes auto-reconnect to a
+// bonded/trusted HID device the instant they see it advertising again,
+// so re-advertising immediately after the user explicitly disconnected
+// (e.g. from the PC's own Bluetooth settings) just gets it silently
+// reconnected within moments - defeating the point of having
+// disconnected at all, and (paired with mruby_filter_ble_wifi_off_while_connected())
+// leaving no real window to use WiFi/WebUI. See
+// mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up. 30s is long
+// enough to actually do something over WiFi, short enough that it
+// doesn't feel "stuck" if a normal reconnect was wanted instead.
+#define BLE_REDISCONNECT_HOLDOFF_US (30 * 1000 * 1000)
+
+static esp_timer_handle_t s_readvertise_timer;
+
+static void readvertise_timer_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "resuming advertising after deliberate-disconnect holdoff");
+    esp_hid_ble_gap_adv_start();
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  HID device event callback
 // ═══════════════════════════════════════════════════════════════════
@@ -175,6 +205,18 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
         ESP_LOGI(TAG, "connected");
         s_connected = true;
         ble_hid_mouse_pending_reset(); // discard any backlog from before this connection existed
+        if (mruby_filter_ble_wifi_off_while_connected()) {
+            // See mruby_filter_ble_wifi_off_while_connected()'s doc
+            // comment (mruby_filter.h) for why this is opt-in, not
+            // unconditional. Not fatal if it fails - BLE HID keeps
+            // working either way, just without this optimization.
+            esp_err_t err = wifi_manager_suspend();
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "wifi_manager_suspend() failed: %s", esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "ble_wifi_off_while_connected: WiFi stopped while BLE is connected");
+            }
+        }
         break;
     case ESP_HIDD_PROTOCOL_MODE_EVENT:
         // Diagnostic only - see mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
@@ -190,11 +232,44 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
                  param->protocol_mode.protocol_mode ? "REPORT" : "BOOT");
         break;
     case ESP_HIDD_DISCONNECT_EVENT:
-        ESP_LOGI(TAG, "disconnected (reason %d) - resuming advertising",
-                 param->disconnect.reason);
+        ESP_LOGI(TAG, "disconnected (reason %d)", param->disconnect.reason);
         s_connected = false;
         ble_hid_mouse_pending_reset(); // don't deliver a stale backlog as one big jump on reconnect
-        esp_hid_ble_gap_adv_start();
+        if (mruby_filter_ble_wifi_off_while_connected()) {
+            esp_err_t err = wifi_manager_resume();
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "wifi_manager_resume() failed: %s", esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "ble_wifi_off_while_connected: WiFi resumed - WebUI reachable again");
+            }
+        }
+
+        // NimBLE reports HCI status/reason codes as
+        // BLE_HS_ERR_HCI_BASE(0x200) + the raw HCI error (see ble_hs.h) -
+        // 0x13 (BLE_ERR_REM_USER_CONN_TERM, "Remote User Terminated
+        // Connection") is what either side's Bluetooth stack sends for a
+        // *deliberate* disconnect (e.g. the user disconnecting from the
+        // PC's own Bluetooth settings), as opposed to something like 0x08
+        // "Connection Timeout" (radio range/interference - an involuntary
+        // drop). Re-advertising immediately after a deliberate disconnect
+        // just invites most OSes' own auto-reconnect-to-bonded-HID-device
+        // policy to reconnect within moments - defeating the point of
+        // having disconnected at all, and (paired with
+        // ble_wifi_off_while_connected above) leaving no real window to
+        // use WiFi/WebUI. See mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+        // follow-up. Hold off in that case only - an involuntary drop
+        // still re-advertises immediately, so a real out-of-range
+        // reconnect isn't delayed.
+        if (param->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM) &&
+            s_readvertise_timer != NULL) {
+            ESP_LOGI(TAG, "deliberate disconnect - holding off re-advertising for %ds",
+                     (int)(BLE_REDISCONNECT_HOLDOFF_US / 1000000));
+            esp_timer_stop(s_readvertise_timer); // no-op if not already running
+            esp_timer_start_once(s_readvertise_timer, BLE_REDISCONNECT_HOLDOFF_US);
+        } else {
+            ESP_LOGI(TAG, "resuming advertising");
+            esp_hid_ble_gap_adv_start();
+        }
         break;
     case ESP_HIDD_STOP_EVENT:
         ESP_LOGI(TAG, "stopped");
@@ -236,10 +311,40 @@ esp_err_t ble_hid_device_start(void)
         return ESP_OK;
     }
 
+    const esp_timer_create_args_t readvertise_timer_args = {
+        .callback = readvertise_timer_cb,
+        .name = "ble_readv",
+    };
+    esp_err_t timer_ret = esp_timer_create(&readvertise_timer_args, &s_readvertise_timer);
+    if (timer_ret != ESP_OK) {
+        // Not fatal - just means a deliberate disconnect (see
+        // hidd_event_callback()) falls back to immediate re-advertising
+        // instead of holding off, same as before this feature existed.
+        ESP_LOGW(TAG, "esp_timer_create (re-advertise holdoff) failed: %s", esp_err_to_name(timer_ret));
+        s_readvertise_timer = NULL;
+    }
+
     esp_err_t ret = esp_hid_gap_init(HIDD_BLE_MODE);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_hid_gap_init failed: %s", esp_err_to_name(ret));
         return ret;
+    }
+
+    // ESP32-S3's WiFi and BT share one 2.4GHz radio - esp_coex arbitrates
+    // airtime between them, and defaults to favoring WiFi. Real-hardware
+    // testing (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up)
+    // isolated this as the actual cause of BLE mouse motion feeling much
+    // choppier whenever WiFi is associated/active, vs. smooth with WiFi
+    // fully disabled - not mruby's per-report dispatch overhead (ruled
+    // out separately) or BLE's own connection-interval floor alone.
+    // Explicitly biasing the arbiter toward BT only once BLE is actually
+    // in use (not globally at boot) keeps the :typec/:udp-only case
+    // (no :ble sink declared, this function never runs) on the default
+    // WiFi-favoring behavior, unaffected.
+    ret = esp_coex_preference_set(ESP_COEX_PREFER_BT);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "esp_coex_preference_set(BT) failed: %s (continuing anyway - not fatal)",
+                 esp_err_to_name(ret));
     }
 
     ret = esp_hid_ble_gap_adv_init(ESP_HID_APPEARANCE_GENERIC, s_hid_config.device_name);

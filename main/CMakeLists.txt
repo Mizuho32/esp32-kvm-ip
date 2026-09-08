@@ -50,6 +50,7 @@ if(KVM_ROLE STREQUAL "HOST")
             mruby
             bt
             esp_hid
+            esp_coex
     )
     # esp_driver_uart (usb_host_rp2040_bridge.c's driver/uart.h), esp_timer
     # (its esp_timer.h, for esp_timer_get_time()), esp_partition
@@ -70,7 +71,7 @@ if(KVM_ROLE STREQUAL "HOST")
     # __getreent/_ctype_ from mruby's own object files) - mruby needs to
     # stay the last of this explicit list, same position it already had
     # before bt/esp_hid existed.
-    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart idf::esp_timer idf::esp_partition idf::esp_http_server idf::bt idf::esp_hid idf::mruby)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE idf::esp_driver_uart idf::esp_timer idf::esp_partition idf::esp_http_server idf::bt idf::esp_hid idf::esp_coex idf::mruby)
     # __getreent: libmruby.a ends up as the very last archive on the
     # final link command (true even before bt/esp_hid existed) -
     # normally harmless, since __getreent (which mruby's Prism parser

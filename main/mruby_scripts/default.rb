@@ -42,6 +42,15 @@ sink :typec_cc,    :typec, kind: :consumer
 # sink :ble_mouse, :ble, kind: :mouse
 # sink :ble_cc,    :ble, kind: :consumer
 
+# ble_wifi_off_while_connected true - opt-in (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+# follow-up): stops WiFi (and therefore the WebUI + any :udp sink)
+# entirely for as long as a BLE HID connection is up, freeing the shared
+# 2.4GHz radio from WiFi/BT coexistence contention - real-hardware
+# testing found this contention still noticeably slows BLE mouse motion
+# even with esp_coex biased toward BT. WiFi/WebUI come back automatically
+# the moment BLE disconnects.
+# ble_wifi_off_while_connected true
+
 pipeline :keyboard do
   from :local_kbd
   to :typec_kbd   # no block = pure passthrough fan-out

@@ -121,6 +121,24 @@ bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void);
 // mds/usb_hid/2026-09-07_ble_hid_sink_plan.md.
 bool mruby_filter_ble_sink_declared(void);
 
+// The script may call `ble_wifi_off_while_connected true` to have
+// ble_hid_device.c's connect/disconnect events drive wifi_manager_suspend()/
+// wifi_manager_resume() (the same esp_wifi_stop()/esp_wifi_start() pair
+// power_manager.c already uses for USB-suspend power saving) - stopping
+// WiFi entirely for as long as a BLE HID connection is actually up, and
+// restarting it (WebUI reachable again) the moment it drops. Real-hardware
+// testing found ESP32-S3's WiFi/BT radio-sharing coexistence (esp_coex)
+// still measurably slows BLE mouse motion even with esp_coex_preference_set()
+// biased toward BT and even while WiFi is merely *failing* to associate
+// (periodic reconnect attempts still contend for airtime) - see
+// mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up. Stopping WiFi
+// outright removes the contention entirely, at the cost of the :udp sink
+// (if any) and the WebUI both going dark for that same stretch - which is
+// why this defaults to *false* and needs the script to opt in, unlike
+// usb_suspend_wifi_sleep's default-true (that one only reacts to the PC's
+// own USB link suspending, not to a sink actually being in active use).
+bool mruby_filter_ble_wifi_off_while_connected(void);
+
 // The script may call `usb_suspend_rp2040_sleep true` to opt this board
 // into power_manager.c also telling the RP2040 bridge backend
 // (usb_host_rp2040_bridge.c, KVM_ROLE=HOST + rp2040_bridge active only) to

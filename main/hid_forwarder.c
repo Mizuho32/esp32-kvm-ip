@@ -41,6 +41,26 @@
 // stay fully wired up as the always-available C fallback, not dead code.
 #include "mruby_filter.h"
 
+// EXPERIMENTAL performance-isolation toggle (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
+// follow-up: is BLE mouse FPS actually capped by BLE's own connection-
+// interval floor, or is something else in this project's stack - mruby's
+// per-report dispatch, WiFi/lwIP running concurrently, etc. - still
+// costing something on top of that?). When 1, every keyboard/mouse/
+// consumer report goes STRAIGHT to ble_hid_device_*_report(), bypassing
+// mruby_filter_active()/the DSL pipeline, UDP, and type-c entirely - the
+// shortest possible path from "USB Host backend parsed a report" to "BLE
+// notify attempted". Same idiom as HOST_MINIMAL_TEST (main_host.c) /
+// BRIDGE_MINIMAL_TEST (usb_host_rp2040_bridge.c) - a separate toggle in
+// each file, meant to be flipped together, not a shared header: set
+// main_host.c's matching HOST_BLE_ONLY_TEST too, which skips WiFi/WebUI/
+// type-c/mruby_filter_init() entirely so nothing else is running
+// concurrently either.
+#define HOST_BLE_ONLY_TEST 0
+
+#if HOST_BLE_ONLY_TEST
+#include "ble_hid_device.h"
+#endif
+
 #define TAG "HIDFWD"
 
 static int s_sock = -1;
@@ -219,6 +239,10 @@ static void apply_mouse_synth_keys(uint8_t modifiers, uint8_t keycode)
 
 void hid_forwarder_keyboard_report(uint8_t modifiers, const uint8_t keycodes_in[6])
 {
+#if HOST_BLE_ONLY_TEST
+    ble_hid_device_keyboard_report(modifiers, keycodes_in);
+    return;
+#endif
     uint8_t keycodes[6];
     memcpy(keycodes, keycodes_in, 6);
 
@@ -244,6 +268,10 @@ void hid_forwarder_keyboard_report(uint8_t modifiers, const uint8_t keycodes_in[
 
 void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
 {
+#if HOST_BLE_ONLY_TEST
+    ble_hid_device_mouse_report(buttons, dx, dy, wheel, pan);
+    return;
+#endif
     uint8_t synth_modifiers = 0;
     uint8_t synth_keycode = HID_KEY_NO_PRESS;
 
@@ -279,6 +307,10 @@ void hid_forwarder_mouse_sample(uint8_t buttons, int16_t dx, int16_t dy, int8_t 
 
 void hid_forwarder_consumer(uint16_t usage_id)
 {
+#if HOST_BLE_ONLY_TEST
+    ble_hid_device_consumer_report(usage_id);
+    return;
+#endif
     // See dispatch_merged_keyboard_report()'s comment - same reasoning.
     if (mruby_filter_active()) {
         mruby_dispatch_consumer(usage_id);
