@@ -27,6 +27,7 @@
 #include "esp_timer.h"
 
 #include "mruby_filter.h"
+#include "status_led.h"
 #include "wifi_manager.h"
 
 static const char *TAG = "BLE_HID";
@@ -183,6 +184,7 @@ static void readvertise_timer_cb(void *arg)
     (void)arg;
     ESP_LOGI(TAG, "resuming advertising after deliberate-disconnect holdoff");
     esp_hid_ble_gap_adv_start();
+    status_led_set_ble_advertising(true);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -200,10 +202,12 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
     case ESP_HIDD_START_EVENT:
         ESP_LOGI(TAG, "started, advertising");
         esp_hid_ble_gap_adv_start();
+        status_led_set_ble_advertising(true);
         break;
     case ESP_HIDD_CONNECT_EVENT:
         ESP_LOGI(TAG, "connected");
         s_connected = true;
+        status_led_set_ble_advertising(false); // no longer waiting - back to plain solid-on
         ble_hid_mouse_pending_reset(); // discard any backlog from before this connection existed
         if (mruby_filter_ble_wifi_off_while_connected()) {
             // See mruby_filter_ble_wifi_off_while_connected()'s doc
@@ -264,11 +268,17 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
             s_readvertise_timer != NULL) {
             ESP_LOGI(TAG, "deliberate disconnect - holding off re-advertising for %ds",
                      (int)(BLE_REDISCONNECT_HOLDOFF_US / 1000000));
+            // Not advertising during the holdoff - plain solid-on (or off,
+            // if WiFi itself isn't up) is the honest state to show; the
+            // pattern resumes from readvertise_timer_cb() once advertising
+            // actually restarts.
+            status_led_set_ble_advertising(false);
             esp_timer_stop(s_readvertise_timer); // no-op if not already running
             esp_timer_start_once(s_readvertise_timer, BLE_REDISCONNECT_HOLDOFF_US);
         } else {
             ESP_LOGI(TAG, "resuming advertising");
             esp_hid_ble_gap_adv_start();
+            status_led_set_ble_advertising(true);
         }
         break;
     case ESP_HIDD_STOP_EVENT:

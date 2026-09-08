@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "ble_hid_device.h"
 #include "mruby_filter.h"
 #include "usb_descriptors.h"
 
@@ -180,12 +181,21 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     uint32_t tmp_len;
     bool custom_frontend = find_webui_html_partition(&tmp_len) != NULL;
 
-    char buf[192];
+    // "not declared": the loaded script never called `sink :name, :ble`
+    // (mruby_filter_ble_sink_declared()), so ble_hid_device_start() never
+    // ran at all - no NimBLE stack up, "Unpair" below is a no-op. See
+    // mds/usb_hid/2026-09-07_ble_hid_sink_plan.md.
+    const char *ble_state = !mruby_filter_ble_sink_declared() ? "not declared by script"
+                             : ble_hid_device_connected()      ? "connected"
+                                                                : "advertising / not paired";
+
+    char buf[256];
     const char *hostname = mruby_filter_hostname();
-    int n = snprintf(buf, sizeof(buf), "mruby: %s\nhostname: %s\nfrontend: %s\n",
+    int n = snprintf(buf, sizeof(buf), "mruby: %s\nhostname: %s\nfrontend: %s\nble: %s\n",
                       mruby_filter_active() ? "active" : "inactive (C filter_rules.h/route_rules.h fallback in effect)",
                       hostname ? hostname : "(not set by script)",
-                      custom_frontend ? "custom (uploaded via UART)" : "embedded default");
+                      custom_frontend ? "custom (uploaded via UART)" : "embedded default",
+                      ble_state);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store"); // same reasoning as script_get_handler()
     return httpd_resp_send(req, buf, (ssize_t)n);
@@ -205,6 +215,20 @@ static esp_err_t sleep_post_handler(httpd_req_t *req)
     usb_device_force_suspended();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_send(req, "Sleeping - WiFi will stop shortly.\n", HTTPD_RESP_USE_STRLEN);
+}
+
+// POST /api/ble_unpair - forgets every bonded BLE central (ble_hid_device_unpair())
+// so a different PC can pair next - see ble_hid_device.h's doc comment and
+// mds/usb_hid/2026-09-07_ble_hid_sink_plan.md's ペアリング section ("ESP32側
+// UIは不要...別PCと再ペアリングしたい用にUnpairボタンを追加"). Safe to call
+// even if no `:ble` sink was ever declared by the script (ble_hid_device_unpair()
+// is a no-op before ble_hid_device_start() ran) or nothing is currently
+// bonded/connected - no separate guard needed here.
+static esp_err_t ble_unpair_post_handler(httpd_req_t *req)
+{
+    ble_hid_device_unpair();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, "Unpaired - a different PC can pair now.\n", HTTPD_RESP_USE_STRLEN);
 }
 
 // Runs esp_restart() from a separate task rather than inline in
@@ -356,12 +380,14 @@ void mruby_webui_start(void)
     static const httpd_uri_t status_uri    = { .uri = "/api/status",  .method = HTTP_GET,  .handler = status_get_handler };
     static const httpd_uri_t frontend_post = { .uri = "/api/frontend", .method = HTTP_POST, .handler = frontend_post_handler };
     static const httpd_uri_t sleep_post    = { .uri = "/api/sleep",    .method = HTTP_POST, .handler = sleep_post_handler };
+    static const httpd_uri_t ble_unpair_post = { .uri = "/api/ble_unpair", .method = HTTP_POST, .handler = ble_unpair_post_handler };
     httpd_register_uri_handler(s_server, &index_uri);
     httpd_register_uri_handler(s_server, &script_get);
     httpd_register_uri_handler(s_server, &script_post);
     httpd_register_uri_handler(s_server, &status_uri);
     httpd_register_uri_handler(s_server, &frontend_post);
     httpd_register_uri_handler(s_server, &sleep_post);
+    httpd_register_uri_handler(s_server, &ble_unpair_post);
 
     ESP_LOGI(TAG, "WebUI listening on port %d", config.server_port);
 #endif
