@@ -25,6 +25,7 @@
 
 #include "ble_hid_device.h"
 #include "hid_forwarder.h"
+#include "mruby_alloc_psram.h"
 // mruby_ctype_shim.c - see mruby_filter_init()'s call to
 // mruby_ctype_shim_touch() below for why. No dedicated header (single
 // call site, single tiny file) - declared here instead.
@@ -1428,6 +1429,16 @@ bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, si
     // "saved" *looking* response (the frontend's fetch() catch-block
     // fallback text is worded like success) that never actually wrote
     // anything, if that's what happened.
+    // Routes every allocation this throwaway VM makes (mrb_open_core()
+    // through mrb_close() below - its *entire* lifetime, nothing else) to
+    // PSRAM instead of internal SRAM - see mruby_alloc_psram.h's doc
+    // comment and mds/usb_hid/2026-09-09_ble_webui_syntax_check_oom.md for
+    // why (a full Prism parse+codegen pass can need more contiguous
+    // internal SRAM than is left once BLE/NimBLE is active, even though
+    // ~8MB of PSRAM sits free the whole time). Turned back off (below,
+    // both exit paths) as soon as this VM is done with it - see that doc
+    // comment on why the window should stay short.
+    mruby_alloc_prefer_psram(true);
     mrb_state *tmp = mrb_open_core();
     if (tmp == NULL || tmp->exc) {
         // Can't verify - the actual load-at-boot path (mruby_filter_init())
@@ -1438,20 +1449,20 @@ bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, si
         // failure) - both need the same "can't verify" fallback.
         //
         // Heap region dump here too (not just the parse-failure branch
-        // below) - real-hardware reports of intermittent "parse failed (out
-        // of memory?)" (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
-        // follow-up) point at internal SRAM (mruby's allocator here is
-        // plain malloc()/realloc(), see mrb_basic_alloc_func() in mruby's
-        // state.c - this board's PSRAM is only wired up for explicit
-        // heap_caps_malloc(MALLOC_CAP_SPIRAM) callers, not plain malloc(),
-        // so this throwaway VM competes directly with WiFi/lwIP/NimBLE's
-        // own internal-SRAM buffers) being tight enough that even
-        // mrb_open_core() itself can't find room.
+        // below) - this call now runs with mruby_alloc_prefer_psram(true)
+        // already in effect (above), so hitting this at all means even the
+        // ~8MB-free PSRAM path came up short (or failed for some other
+        // reason) - see mds/usb_hid/2026-09-09_ble_webui_syntax_check_oom.md
+        // for the investigation that led here (internal SRAM alone,
+        // before that fix, really was tight enough for this to happen
+        // routinely). Kept as a safety net + diagnostic rather than
+        // removed now that the common case is fixed.
         ESP_LOGW(TAG, "mruby_filter_check_syntax: mrb_open_core() failed, skipping check - internal heap region dump follows");
         heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (tmp != NULL) {
             mrb_close(tmp);
         }
+        mruby_alloc_prefer_psram(false);
         return true;
     }
 
@@ -1497,20 +1508,18 @@ bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, si
                      p->error_buffer[0].lineno, p->error_buffer[0].message);
         } else {
             snprintf(err_buf, err_buf_size, "parse failed (out of memory?)");
-            // See the heap-stats comment on the mrb_open_core() failure
-            // branch above - this is the branch real hardware has actually
-            // hit (MRB_CATCH above, i.e. a NoMemoryError raised mid-parse/
-            // codegen). Trimming NimBLE's own Kconfig footprint (role/
-            // connection-count/MTU/unused-GATT-services, see
-            // sdkconfig.defaults) measurably raised *total* internal free
-            // bytes but left the *largest contiguous block* completely
-            // unchanged on real hardware (mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
-            // follow-up) - i.e. something other than NimBLE's own
-            // allocations is capping the biggest single hole available.
-            // heap_caps_print_heap_info() dumps every registered internal
-            // heap *region* separately (address/len/free/largest per
-            // region, not just the aggregate) - which region the cap lives
-            // in narrows down what's actually responsible.
+            // See the comment on the mrb_open_core() failure branch above -
+            // same reasoning applies here (MRB_CATCH above, i.e. a
+            // NoMemoryError raised mid-parse/codegen, with
+            // mruby_alloc_prefer_psram(true) already in effect). This is
+            // the branch real hardware actually hit repeatedly during the
+            // investigation in mds/usb_hid/2026-09-09_ble_webui_syntax_check_oom.md,
+            // before the PSRAM redirect existed - trimming NimBLE's own
+            // Kconfig footprint alone (still in sdkconfig.defaults, real
+            // if modest savings) left the *largest contiguous internal
+            // block* completely unchanged, which is what pointed at
+            // mruby's own allocator/PSRAM instead of NimBLE's footprint as
+            // the actual fix.
             ESP_LOGW(TAG, "mruby_filter_check_syntax: parse/codegen failed - internal heap region dump follows");
             heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         }
@@ -1522,5 +1531,6 @@ bool mruby_filter_check_syntax(const char *script, size_t len, char *err_buf, si
         mrb_ccontext_free(tmp, cxt);
     }
     mrb_close(tmp);
+    mruby_alloc_prefer_psram(false);
     return ok;
 }

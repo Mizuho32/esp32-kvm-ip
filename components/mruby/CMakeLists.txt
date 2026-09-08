@@ -38,7 +38,28 @@ add_custom_target(mruby_build
     VERBATIM
 )
 
-add_dependencies(${COMPONENT_LIB} mruby_build)
+# main/mruby_alloc_psram.c (mds/usb_hid/2026-09-09_ble_webui_syntax_check_oom.md)
+# provides its own mrb_basic_alloc_func() so the WebUI's throwaway
+# syntax-check VM can be routed to PSRAM - but libmruby.a already defines
+# that same symbol (src/allocf.c), so linking main/mruby_alloc_psram.c as
+# well would be a duplicate-symbol error. mruby's own build.rb (invoked
+# via esp32s3_build_config.rb, rake-driven - see the comment at the top of
+# this file) gathers core src/*.c files internally with no per-file
+# exclude hook exposed to us, and this component's mruby/ checkout stays
+# an unmodified upstream submodule (not something to patch directly) - so
+# strip just that one already-built object out of the finished archive
+# instead. `ar d` on a member that's already gone (e.g. a rebuild that
+# didn't need to regenerate allocf.o) is a harmless no-op (exit 0,
+# confirmed), so this is safe to run unconditionally on every build, same
+# as mruby_build's own rake invocation above.
+add_custom_target(mruby_strip_allocf
+    COMMAND ${CMAKE_AR} d "${MRUBY_LIB}" allocf.o
+    DEPENDS mruby_build
+    COMMENT "Stripping mruby's default allocf.o from libmruby.a (see main/mruby_alloc_psram.c)"
+    VERBATIM
+)
+
+add_dependencies(${COMPONENT_LIB} mruby_strip_allocf)
 target_link_libraries(${COMPONENT_LIB} INTERFACE "${MRUBY_LIB}")
 
 # mruby is the first thing in this project to actually call longjmp()
