@@ -204,6 +204,41 @@ USB polling interval: 1 ms. WiFi Modem Sleep disabled.
 | WiFi Modem Sleep = OFF | Default power saving adds ~200 ms lag on first packet |
 | Task pinning to cores | Network + WiFi stack on Core 0, HID on Core 1, no contention |
 
+## mruby DSL: Event (`ev`) Reference
+
+*(Host role only, `KVM_ROLE=HOST`.)* The Host role can load an mruby script (`main/mruby_scripts/default.rb`, replaceable via the WebUI or `bin/upload_mruby_script.py`) that declares `source`/`sink`/`pipeline` blocks routing HID events between USB Host input, USB-C device output, BLE HID output and UDP. See `mds/usb_hid/2026-08-28_mruby_filter_route.md` for the full DSL design - this section only documents the event object itself.
+
+A `pipeline`'s `to`/`branch` block is called with one argument, `ev` - a plain mruby `Hash` with **Symbol** keys (not a dot-accessor object), rebuilt fresh from the current raw HID report on every call. Its shape depends on the pipeline's `kind` (`:keyboard`, `:mouse` or `:consumer`, aka "cc"):
+
+### `:keyboard`
+
+| key | type | notes |
+|---|---|---|
+| `:modifiers` | Integer, 0–255 | Standard USB HID keyboard modifier bitmask (bit0 LCtrl, bit1 LShift, bit2 LAlt, bit3 LGui, bit4 RCtrl, bit5 RShift, bit6 RAlt, bit7 RGui - TinyUSB's `KEYBOARD_MODIFIER_*` enum) |
+| `:keycodes` | Array of 6 Integers | 6-key rollover slots, each a USB HID Keyboard/Keypad Usage ID; `0` = empty slot. Mutate in place (`ev[:keycodes].map! { ... }`) or assign a new Array - fewer than 6 elements pads with 0, extras beyond 6 are ignored |
+
+### `:mouse`
+
+| key | type | notes |
+|---|---|---|
+| `:buttons` | Integer, 0–255 | Bitmask, bit0=button1/left, bit1=button2/right, bit2=button3/middle, bit3=button4/back, bit4=button5/forward - test with e.g. `ev[:buttons] & (1 << 3)` |
+| `:dx`, `:dy` | Integer, -32768..32767 | Relative movement since the last report (not accumulated/absolute) |
+| `:wheel` | Integer, -128..127 | Vertical scroll delta |
+| `:pan` | Integer, -128..127 | Horizontal scroll delta |
+
+### `:consumer` (cc)
+
+| key | type | notes |
+|---|---|---|
+| `:usage_id` | Integer, 0–65535 | Consumer Page (0x0C) HID Usage ID - e.g. play/pause, volume up/down, mute (see TinyUSB's `HID_USAGE_CONSUMER_*` constants for the numeric values). `0` = release/no key |
+
+### Behavior notes
+
+- **`to` block**: return a Hash to send - any key you don't touch (or that gets removed) falls back to the raw value that was about to be sent, not to any default of your own. Returning `nil` drops the send for that stage/sink entirely (e.g. to conditionally suppress an event). Mutating `ev` in place and returning it works, since it's the same Hash object passed in (see `main/mruby_scripts/examples/key_remap.rb`).
+- **`branch` block**: always receives the *raw* (un-mutated) event, regardless of what any `to` block in the same pipeline did to its own copy - return truthy to forward the raw event to that branch's sink, falsy to skip it (see `main/mruby_scripts/examples/wheel_to_udp_only.rb`).
+- All values are plain mruby Integers regardless of the underlying C type's width - a `to` block that returns an out-of-range value (e.g. `:modifiers` > 255) gets silently truncated/wrapped when narrowed back to the wire type, not rejected.
+- `mouse_synth_keys(buttons, dx, dy, wheel, pan) -> [modifiers, keycode]`, if defined at the script's top level, is a separate hook (not a pipeline block) called once per local mouse sample to optionally synthesize a keyboard key press alongside it (e.g. mouse back/forward buttons → Alt+Left/Right) - see `main/mruby_scripts/examples/wheel_to_udp_only.rb`.
+
 ## Project Structure
 
 ```
