@@ -5,11 +5,22 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "nvs.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
 #define TAG "DBGSTREAM"
+
+// Persists only the user's on/off *intent* across a board reboot (mruby
+// script Save, firmware update, power cycle, ...) - NOT re-derived from
+// debug_stream_active() itself, which always starts false again on
+// boot (this instance is never auto-started otherwise, see the header's
+// "Deliberately NOT started at boot" comment). Mirrors wifi_manager.c's
+// own nvs_open()/nvs_get_*()/nvs_set_*()/nvs_commit() pattern (NVS_NAMESPACE
+// there). Namespace/key names are short: NVS caps both at 15 bytes.
+#define NVS_NAMESPACE  "dbgstream"
+#define NVS_KEY_ENABLED "on"
 
 // ESP-IDF's httpd_start() binds a loopback UDP "control socket" per
 // instance at config.ctrl_port (used internally by httpd_stop() to signal
@@ -47,6 +58,33 @@ static httpd_handle_t s_httpd;
 static QueueHandle_t s_queue;
 static volatile bool s_should_stop;
 
+// Reads the persisted on/off intent, defaulting to false (never started)
+// if the key was never written (fresh NVS, or an old firmware image that
+// predates this) or the read otherwise fails.
+static bool load_persisted_enabled(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    uint8_t v = 0;
+    esp_err_t err = nvs_get_u8(h, NVS_KEY_ENABLED, &v);
+    nvs_close(h);
+    return err == ESP_OK && v != 0;
+}
+
+static void save_persisted_enabled(bool enabled)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_open() failed - on/off state won't survive a reboot this time");
+        return;
+    }
+    nvs_set_u8(h, NVS_KEY_ENABLED, enabled ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 void debug_stream_init(void)
 {
     s_httpd = NULL;
@@ -64,6 +102,20 @@ void debug_stream_init(void)
     // never a use-after-free).
     if (s_queue == NULL) {
         s_queue = xQueueCreate(DEBUG_STREAM_QUEUE_LEN, sizeof(stream_line_t));
+    }
+
+    // Resume automatically if it was left running before the last reboot
+    // (mruby script Save, firmware update, ...) rather than defaulting
+    // back to stopped every time - the WebUI's Save/Update-firmware flows
+    // already reboot the board on every edit, so "stopped until you
+    // explicitly click Stop again" would mean re-clicking Start after
+    // nearly every save while debugging. Called from mruby_webui_start()
+    // (main_host.c), i.e. after wifi_manager_start() has brought up the
+    // TCP/IP thread - safe to open a listening socket here already, same
+    // as the main WebUI instance right beside it.
+    if (load_persisted_enabled()) {
+        ESP_LOGI(TAG, "debug stream was left on before reboot - resuming");
+        debug_stream_start();
     }
 }
 
@@ -146,6 +198,7 @@ esp_err_t debug_stream_start(void)
     };
     httpd_register_uri_handler(s_httpd, &stream_uri);
 
+    save_persisted_enabled(true); // remember across the next reboot too
     ESP_LOGI(TAG, "debug stream started on port %d (GET /stream)", DEBUG_STREAM_PORT);
     return ESP_OK;
 }
@@ -155,6 +208,7 @@ esp_err_t debug_stream_stop(void)
     if (s_httpd == NULL) {
         return ESP_OK; // already stopped
     }
+    save_persisted_enabled(false); // an explicit Stop is what should stick, not auto-resume next boot
     // Tell the /stream handler (if a client is currently connected, its
     // loop is running on *this instance's own task*) to return next time
     // its bounded xQueueReceive() wait times out. This has to happen

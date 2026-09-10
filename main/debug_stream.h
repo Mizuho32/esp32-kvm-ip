@@ -33,8 +33,14 @@
 #define DEBUG_STREAM_PORT 81
 
 // Call once at boot (Host role only, alongside mruby_webui_start()) -
-// just allocates the (small, permanent) queue debug_print() pushes into.
-// Does not start the httpd instance or open any socket yet.
+// allocates the (small, permanent) queue debug_print() pushes into, then
+// also resumes the httpd instance itself (via debug_stream_start()) if
+// it was left running before the last reboot - see
+// mds/usb_hid/2026-09-10_mruby_debug_stream.md's follow-up on why the
+// on/off *intent* (not just the live in-RAM state) is persisted to NVS:
+// the WebUI's Save/Update-firmware flows already reboot the board on
+// every script edit, so without this a debugging session would need
+// Start re-clicked after nearly every save.
 void debug_stream_init(void);
 
 // True while the httpd instance (started via debug_stream_start()) is up.
@@ -57,16 +63,23 @@ void debug_stream_push(const char *line);
 // its own task - see this file's top comment) and registers its GET
 // /stream handler. Idempotent: a no-op returning ESP_OK if already
 // running (e.g. a second browser tab clicking Start, or a reload after
-// the stream was left running).
+// the stream was left running). Also persists "on" to NVS so
+// debug_stream_init() resumes it automatically after the next reboot -
+// see that function's doc comment.
 esp_err_t debug_stream_start(void);
 
 // Stops the httpd instance started by debug_stream_start() (a no-op
-// returning ESP_OK if it isn't running). Safe to call from mruby_webui.c's
-// own httpd worker task despite that being a *different* httpd instance's
-// task than the one being stopped - see the .c file's comment on why the
-// /stream handler's internal poll loop (rather than an unbounded wait) is
-// what makes this not hang the caller (verified against esp_http_server's
-// own httpd_stop()/httpd_server() source, not just assumed).
+// returning ESP_OK if it isn't running). Also persists "off" to NVS, so
+// this is the one call that actually sticks across a reboot - starting
+// again always requires an explicit debug_stream_start() (a fresh boot's
+// debug_stream_init() only resumes what was last stopped this way, it
+// never turns the stream on out of nowhere). Safe to call from
+// mruby_webui.c's own httpd worker task despite that being a *different*
+// httpd instance's task than the one being stopped - see the .c file's
+// comment on why the /stream handler's internal poll loop (rather than
+// an unbounded wait) is what makes this not hang the caller (verified
+// against esp_http_server's own httpd_stop()/httpd_server() source, not
+// just assumed).
 esp_err_t debug_stream_stop(void);
 
 #endif

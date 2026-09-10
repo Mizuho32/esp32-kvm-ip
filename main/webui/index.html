@@ -71,9 +71,11 @@
   button reflects the board's actual state (fetched from /api/status), not
   just what this tab remembers, so reloading or reopening this page while
   it's still running picks the log back up automatically instead of
-  losing track of it - it only really turns off once you click "Stop"
-  (or the board reboots, which always clears it). One viewer at a time is
-  the expected use.
+  losing track of it. It also survives a reboot (Save/Update firmware
+  both reboot the board): starting it is remembered, so it comes back on
+  its own afterwards instead of needing "Start" clicked again after every
+  save - only clicking "Stop" actually turns it off for good. One viewer
+  at a time is the expected use.
 </p>
 <p class="hint">
   "Update firmware" flashes a new esp32-kvm-ip <code>.bin</code> (an
