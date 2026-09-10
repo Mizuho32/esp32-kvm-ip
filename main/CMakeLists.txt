@@ -33,6 +33,7 @@ if(KVM_ROLE STREQUAL "HOST")
             "mruby_ctype_shim.c"
             "mruby_alloc_psram.c"
             "debug_stream.c"
+            "ota_updater.c"
         INCLUDE_DIRS "."
         EMBED_TXTFILES
             "mruby_scripts/default.rb"
@@ -53,6 +54,7 @@ if(KVM_ROLE STREQUAL "HOST")
             bt
             esp_hid
             esp_coex
+            app_update
     )
     # esp_driver_uart (usb_host_rp2040_bridge.c's driver/uart.h), esp_timer
     # (its esp_timer.h, for esp_timer_get_time()), esp_partition
@@ -116,6 +118,7 @@ elseif(KVM_ROLE STREQUAL "DEVICE")
             esp_hw_support
             esp_partition
             esp_timer
+            app_update
     )
     # esp_partition (wifi_manager.c's esp_partition.h, for the wifi_cred
     # partition - see wifi_manager_load_credentials()) and esp_timer

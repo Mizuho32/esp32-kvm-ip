@@ -199,3 +199,13 @@ CONFIG_BT_NIMBLE_TPS_SERVICE=n
 CONFIG_BT_NIMBLE_IAS_SERVICE=n
 CONFIG_BT_NIMBLE_LLS_SERVICE=n
 CONFIG_BT_NIMBLE_HR_SERVICE=n
+
+# WiFi OTA (mruby_webui.c's POST /api/firmware, ota_updater.c,
+# mds/usb_hid/2026-09-10_wifi_ota.md). partitions.csv uses a two-slot
+# ota_0/ota_1 scheme (no factory) - this makes the bootloader mark a
+# freshly-flashed OTA image "pending verify" on its first boot and
+# automatically revert to the previous slot if that first boot never
+# calls esp_ota_mark_app_valid_cancel_rollback() (crash, watchdog reset,
+# or power loss before the app confirms itself) - see
+# ota_updater.c's app_main()-time call to that function.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y

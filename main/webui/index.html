@@ -33,6 +33,10 @@
   <span id="msg"></span>
 </p>
 <pre id="debugLog"></pre>
+<p>
+  <input type="file" id="firmwareFile" accept=".bin">
+  <button id="firmwareUpload" disabled>Update firmware</button>
+</p>
 <p class="hint">
   Saving writes the mrb_script partition and reboots the board to apply
   it - same effect as bin/upload_mruby_script.py, but over WiFi instead
@@ -67,6 +71,17 @@
   does NOT stop automatically when you navigate away or close this tab).
   One viewer at a time is the expected use.
 </p>
+<p class="hint">
+  "Update firmware" flashes a new esp32-kvm-ip <code>.bin</code> (an
+  <code>idf.py build</code> output, e.g. <code>build.host/esp32-kvm-ip.bin</code>
+  for the Host role) over WiFi instead of needing a USB cable. It's
+  written to the currently-inactive slot and only takes effect after a
+  reboot. If the new firmware crashes or never gets as far as connecting
+  to WiFi, the board automatically reverts to the previous firmware on
+  its next boot - the "firmware:" line above shows which slot is running
+  and whether it's confirmed "valid" yet. Only flash a <code>.bin</code>
+  actually built for this board/role - there's no compatibility check.
+</p>
 
 <script src="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/ruby/ruby.min.js"></script>
@@ -79,6 +94,8 @@ const bleUnpairBtn = document.getElementById('bleUnpair');
 const debugStartBtn = document.getElementById('debugStart');
 const debugStopBtn = document.getElementById('debugStop');
 const debugLogEl = document.getElementById('debugLog');
+const firmwareFileEl = document.getElementById('firmwareFile');
+const firmwareUploadBtn = document.getElementById('firmwareUpload');
 const msgEl = document.getElementById('msg');
 
 // Keep in sync with main/debug_stream.h's DEBUG_STREAM_PORT.
@@ -228,6 +245,35 @@ debugStopBtn.onclick = async () => {
     msgEl.textContent = 'stop request failed: ' + e;
   }
   debugStartBtn.disabled = false;
+};
+
+firmwareFileEl.onchange = () => {
+  firmwareUploadBtn.disabled = !firmwareFileEl.files.length;
+};
+
+firmwareUploadBtn.onclick = async () => {
+  const file = firmwareFileEl.files[0];
+  if (!file) return;
+  if (!confirm(`Flash ${file.name} (${file.size} bytes) as new firmware and reboot? ` +
+               'Only do this with a real esp32-kvm-ip .bin built for this board/role.')) {
+    return;
+  }
+  firmwareUploadBtn.disabled = true;
+  msgEl.textContent = 'uploading firmware (this can take a while - do not close this page)...';
+  try {
+    // fetch() sets Content-Length from the File's own size automatically -
+    // the board's /api/firmware handler requires it upfront.
+    const res = await fetch('/api/firmware', { method: 'POST', body: file });
+    const text = await res.text();
+    if (res.ok) {
+      msgEl.textContent = text.trim() + ' Refresh this page in a few seconds.';
+    } else {
+      msgEl.textContent = 'error: ' + text;
+      firmwareUploadBtn.disabled = false;
+    }
+  } catch (e) {
+    msgEl.textContent = 'uploaded - board is rebooting (connection drop here is expected).';
+  }
 };
 
 loadStatus();

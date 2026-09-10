@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "nvs.h"
@@ -267,6 +268,23 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         xEventGroupClearBits(wifi_event_group, WIFI_DISCONNECTED_BIT);
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_INIT_DONE_BIT);
         save_current_connection();
+
+        // partitions.csv (mds/usb_hid/2026-09-10_wifi_ota.md) uses a
+        // two-slot ota_0/ota_1 scheme with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE -
+        // a freshly OTA-flashed image boots in "pending verify" state, and
+        // the bootloader auto-reverts to the *previous* slot if that state
+        // is still set on the next boot (i.e. this one crashed/reset before
+        // getting here). Confirming it here - the first successful WiFi
+        // connection, common to both roles - covers the most likely way a
+        // bad update actually misbehaves (crash/panic/boot loop somewhere
+        // during early init) without needing a dedicated watchdog just for
+        // this. A once-per-boot flag isn't needed: this call is a cheap
+        // no-op once already confirmed (or on a plain non-OTA/factory
+        // boot), and IP_EVENT_STA_GOT_IP re-fires on every reconnect.
+        esp_err_t ota_err = esp_ota_mark_app_valid_cancel_rollback();
+        if (ota_err != ESP_OK && ota_err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "esp_ota_mark_app_valid_cancel_rollback() failed: %s", esp_err_to_name(ota_err));
+        }
     }
 }
 

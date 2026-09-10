@@ -6,6 +6,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
 
 #include "freertos/FreeRTOS.h"
@@ -14,6 +15,7 @@
 #include "ble_hid_device.h"
 #include "debug_stream.h"
 #include "mruby_filter.h"
+#include "ota_updater.h"
 #include "usb_descriptors.h"
 
 #define TAG "MRBWEBUI"
@@ -190,16 +192,33 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                              : ble_hid_device_connected()      ? "connected"
                                                                 : "advertising / not paired";
 
-    char buf[320];
+    // Which OTA slot is currently running (mds/usb_hid/2026-09-10_wifi_ota.md) -
+    // handy for confirming an update actually took effect (label flips
+    // ota_0 <-> ota_1 each time) and for telling a still-"pending verify"
+    // boot apart from a confirmed one after an update.
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
+    esp_ota_get_state_partition(running, &ota_state);
+    const char *ota_state_str = ota_state == ESP_OTA_IMG_VALID          ? "valid"
+                                : ota_state == ESP_OTA_IMG_PENDING_VERIFY ? "pending verify"
+                                : ota_state == ESP_OTA_IMG_NEW            ? "new"
+                                : ota_state == ESP_OTA_IMG_INVALID        ? "invalid"
+                                : ota_state == ESP_OTA_IMG_ABORTED        ? "aborted"
+                                                                          : "undefined";
+
+    char buf[384];
     const char *hostname = mruby_filter_hostname();
     int n = snprintf(buf, sizeof(buf),
-                      "mruby: %s\nhostname: %s\nfrontend: %s\nble: %s\ndebug_stream: %s (port %d)\n",
+                      "mruby: %s\nhostname: %s\nfrontend: %s\nble: %s\ndebug_stream: %s (port %d)\n"
+                      "firmware: %s (%s)\n",
                       mruby_filter_active() ? "active" : "inactive (C filter_rules.h/route_rules.h fallback in effect)",
                       hostname ? hostname : "(not set by script)",
                       custom_frontend ? "custom (uploaded via UART)" : "embedded default",
                       ble_state,
                       debug_stream_active() ? "active" : "inactive",
-                      DEBUG_STREAM_PORT);
+                      DEBUG_STREAM_PORT,
+                      running ? running->label : "?",
+                      ota_state_str);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store"); // same reasoning as script_get_handler()
     return httpd_resp_send(req, buf, (ssize_t)n);
@@ -375,6 +394,65 @@ static esp_err_t frontend_post_handler(httpd_req_t *req)
     return httpd_resp_send(req, "Saved.\n", HTTPD_RESP_USE_STRLEN);
 }
 
+// POST /api/firmware - WiFi OTA update (mds/usb_hid/2026-09-10_wifi_ota.md).
+// Unlike recv_full_body() (used by script_post_handler()/frontend_post_handler()
+// above, fine for a few KB) this streams the request body straight into
+// ota_updater.c's inactive OTA slot via ota_updater_write() as it arrives,
+// never buffering the whole ~2-3MB image in RAM. Requires a Content-Length
+// (req->content_len) upfront - not just so ota_updater_begin() can erase
+// only as much of the slot as it actually needs, but so a request with no
+// declared length can't make this loop read forever.
+static esp_err_t firmware_post_handler(httpd_req_t *req)
+{
+    if (req->content_len == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing Content-Length");
+        return ESP_FAIL;
+    }
+
+    esp_err_t err = ota_updater_begin(req->content_len);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+
+    char buf[1024];
+    size_t remaining = req->content_len;
+    while (remaining > 0) {
+        int to_read = remaining < sizeof(buf) ? (int)remaining : (int)sizeof(buf);
+        int r = httpd_req_recv(req, buf, to_read);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue; // same retry idiom as recv_full_body() above
+            }
+            ota_updater_abort();
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "read error");
+            return ESP_FAIL;
+        }
+        err = ota_updater_write(buf, (size_t)r);
+        if (err != ESP_OK) {
+            ota_updater_abort();
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+            return ESP_FAIL;
+        }
+        remaining -= (size_t)r;
+    }
+
+    err = ota_updater_finish();
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "New firmware saved via WebUI - restarting to apply it");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_send(req, "Saved - rebooting...\n", HTTPD_RESP_USE_STRLEN);
+
+    if (xTaskCreate(restart_task, "mrbwebui_restart", 2048, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "failed to start restart task - reboot manually to apply the new firmware");
+    }
+    return ESP_OK;
+}
+
 void mruby_webui_start(void)
 {
 #if !CONFIG_MRUBY_FILTER_ROUTE_ENABLE
@@ -395,7 +473,7 @@ void mruby_webui_start(void)
     // Save in the WebUI, i.e. a stack overflow here corrupting adjacent
     // memory rather than crashing at the overflow site itself.
     config.stack_size = 16384;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 12;
 
     // debug_stream.c's own httpd instance/task is separate and started
     // on demand (debug_stream_start(), below) - this just allocates the
@@ -417,6 +495,7 @@ void mruby_webui_start(void)
     static const httpd_uri_t ble_unpair_post = { .uri = "/api/ble_unpair", .method = HTTP_POST, .handler = ble_unpair_post_handler };
     static const httpd_uri_t debug_stream_start_post = { .uri = "/api/debug_stream/start", .method = HTTP_POST, .handler = debug_stream_start_post_handler };
     static const httpd_uri_t debug_stream_stop_post  = { .uri = "/api/debug_stream/stop",  .method = HTTP_POST, .handler = debug_stream_stop_post_handler };
+    static const httpd_uri_t firmware_post = { .uri = "/api/firmware", .method = HTTP_POST, .handler = firmware_post_handler };
     httpd_register_uri_handler(s_server, &index_uri);
     httpd_register_uri_handler(s_server, &script_get);
     httpd_register_uri_handler(s_server, &script_post);
@@ -426,6 +505,7 @@ void mruby_webui_start(void)
     httpd_register_uri_handler(s_server, &ble_unpair_post);
     httpd_register_uri_handler(s_server, &debug_stream_start_post);
     httpd_register_uri_handler(s_server, &debug_stream_stop_post);
+    httpd_register_uri_handler(s_server, &firmware_post);
 
     ESP_LOGI(TAG, "WebUI listening on port %d", config.server_port);
 #endif

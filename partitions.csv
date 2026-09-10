@@ -1,8 +1,33 @@
 # Name,      Type, SubType, Offset,  Size
 # Target hardware: ESP32-S3, 8MB flash (see
-# mds/usb_hid/2026-08-28_mruby_filter_route.md). factory is sized well
-# above the current ~2MB app image (mruby brings Host role over the
-# previous default 1MB factory partition) with headroom for growth.
+# mds/usb_hid/2026-08-28_mruby_filter_route.md).
+#
+# otadata/ota_0/ota_1: WiFi OTA firmware updates (mruby_webui.c's
+# POST /api/firmware, mds/usb_hid/2026-09-10_wifi_ota.md) - the standard
+# esp_ota_ops two-slot scheme with rollback: otadata (fixed 0x2000 size,
+# required by ESP-IDF - holds two 32-byte "which slot / how many boots
+# has it survived" records) tracks which of ota_0/ota_1 is the current
+# boot target, ota_0/ota_1 are the two updatable app slots (an update
+# always writes to whichever one *isn't* currently running). Deliberately
+# no third `factory` slot (ESP-IDF's own partitions_two_ota.csv example
+# keeps one) - a plain two-slot table is all esp_ota_ops's rollback
+# mechanism actually needs, and a third full-size app partition would be
+# another 3MB this board's 8MB flash doesn't have much room to spare on
+# top of everything below. First flash (idf.py flash, no OTA yet
+# involved) writes the single built app image into ota_0 and a blank
+# otadata - ESP-IDF's bootloader treats blank otadata as "boot ota_0" by
+# default when no factory partition exists, so this needs no special
+# handling.
+#
+# 3M each (was factory's single 3M) - sized well above the current
+# ~2.3MB app image (mruby brings Host role over the previous default 1MB
+# factory partition) with headroom for growth, same reasoning the old
+# single factory partition had. ota_0's offset is given explicitly
+# (0x20000) rather than left blank for the same alignment reason
+# factory's was (see nvs's comment below) - app-type partitions must
+# land on a 64K boundary, and otadata's preceding 8K doesn't get there on
+# its own. ota_1 doesn't need an explicit offset: 0x20000 + 3M (ota_0's
+# end) is already 64K-aligned.
 #
 # mrb_script: raw (non-filesystem) storage for one uploaded mruby script -
 # a 4-byte little-endian length header followed by the script's UTF-8
@@ -12,7 +37,7 @@
 # if this partition is empty/erased/invalid. Custom subtype 0x50 is in
 # ESP-IDF's user-defined data-subtype range (0x40-0xFE) - see
 # mds/usb_hid/2026-08-29_mruby_phase1_impl.md. Offset left blank so
-# gen_esp32part.py places it right after factory.
+# gen_esp32part.py places it right after ota_1.
 #
 # webui_html: same raw storage scheme (4-byte length header + bytes),
 # subtype 0x51, for main/mruby_webui.c's GET / page. Lets the WebUI's own
@@ -29,13 +54,10 @@
 # *and* NimBLE's bond store (LTK/IRK/CSRK/CCCD per paired PC, see
 # ble_hid_device.c) once BLE HID is in use. 24K was tight enough with
 # WiFi alone that it's a real suspect for BLE bonds silently failing to
-# persist across a reset (auth failures on reconnect). phy_init's offset
-# is now left blank (was a hardcoded 0xf000, i.e. immediately after the
-# *old* 24K-sized nvs) so gen_esp32part.py auto-places it right after
-# the bigger nvs instead of overlapping it. factory's offset moved from
-# 0x10000 to 0x20000 for the same reason (app-type partitions must stay
-# 64K-aligned, and nvs+phy_init's new combined 52K no longer fits before
-# the old 0x10000 boundary).
+# persist across a reset (auth failures on reconnect). phy_init's and
+# otadata's offsets are left blank so gen_esp32part.py auto-places each
+# right after the previous one instead of relying on further hardcoded
+# offsets.
 #
 # wifi_cred: same raw storage scheme again, subtype 0x52, for
 # wifi_manager.c's wifi_manager_load_credentials() - written via
@@ -53,7 +75,9 @@
 # both already sector-sized.
 nvs,        data, nvs,     0x9000,  48K,
 phy_init,   data, phy,     ,        4K,
-factory,    app,  factory, 0x20000, 3M,
+otadata,    data, ota,     ,        0x2000,
+ota_0,      app,  ota_0,   0x20000, 3M,
+ota_1,      app,  ota_1,   ,        3M,
 mrb_script, data, 0x50,    ,        64K,
 webui_html, data, 0x51,    ,        32K,
 wifi_cred,  data, 0x52,    ,        4K,
