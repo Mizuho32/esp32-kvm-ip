@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 
 #include "ble_hid_device.h"
+#include "debug_stream.h"
 #include "mruby_filter.h"
 #include "usb_descriptors.h"
 
@@ -189,13 +190,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                              : ble_hid_device_connected()      ? "connected"
                                                                 : "advertising / not paired";
 
-    char buf[256];
+    char buf[320];
     const char *hostname = mruby_filter_hostname();
-    int n = snprintf(buf, sizeof(buf), "mruby: %s\nhostname: %s\nfrontend: %s\nble: %s\n",
+    int n = snprintf(buf, sizeof(buf),
+                      "mruby: %s\nhostname: %s\nfrontend: %s\nble: %s\ndebug_stream: %s (port %d)\n",
                       mruby_filter_active() ? "active" : "inactive (C filter_rules.h/route_rules.h fallback in effect)",
                       hostname ? hostname : "(not set by script)",
                       custom_frontend ? "custom (uploaded via UART)" : "embedded default",
-                      ble_state);
+                      ble_state,
+                      debug_stream_active() ? "active" : "inactive",
+                      DEBUG_STREAM_PORT);
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store"); // same reasoning as script_get_handler()
     return httpd_resp_send(req, buf, (ssize_t)n);
@@ -229,6 +233,30 @@ static esp_err_t ble_unpair_post_handler(httpd_req_t *req)
     ble_hid_device_unpair();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_send(req, "Unpaired - a different PC can pair now.\n", HTTPD_RESP_USE_STRLEN);
+}
+
+// POST /api/debug_stream/start - see debug_stream.h's doc comment for why
+// this is a separate httpd instance/port rather than one more endpoint on
+// *this* one. Idempotent (harmless if already running).
+static esp_err_t debug_stream_start_post_handler(httpd_req_t *req)
+{
+    esp_err_t err = debug_stream_start();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "Debug stream started on port %d.\n", DEBUG_STREAM_PORT);
+    return httpd_resp_send(req, buf, n);
+}
+
+// POST /api/debug_stream/stop - idempotent (harmless if not running).
+static esp_err_t debug_stream_stop_post_handler(httpd_req_t *req)
+{
+    debug_stream_stop();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, "Debug stream stopped.\n", HTTPD_RESP_USE_STRLEN);
 }
 
 // Runs esp_restart() from a separate task rather than inline in
@@ -367,7 +395,13 @@ void mruby_webui_start(void)
     // Save in the WebUI, i.e. a stack overflow here corrupting adjacent
     // memory rather than crashing at the overflow site itself.
     config.stack_size = 16384;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
+
+    // debug_stream.c's own httpd instance/task is separate and started
+    // on demand (debug_stream_start(), below) - this just allocates the
+    // small, permanent queue debug_print() pushes into. See
+    // debug_stream.h's doc comment.
+    debug_stream_init();
 
     if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start() failed - WebUI not available (bin/upload_mruby_script.py still works)");
@@ -381,6 +415,8 @@ void mruby_webui_start(void)
     static const httpd_uri_t frontend_post = { .uri = "/api/frontend", .method = HTTP_POST, .handler = frontend_post_handler };
     static const httpd_uri_t sleep_post    = { .uri = "/api/sleep",    .method = HTTP_POST, .handler = sleep_post_handler };
     static const httpd_uri_t ble_unpair_post = { .uri = "/api/ble_unpair", .method = HTTP_POST, .handler = ble_unpair_post_handler };
+    static const httpd_uri_t debug_stream_start_post = { .uri = "/api/debug_stream/start", .method = HTTP_POST, .handler = debug_stream_start_post_handler };
+    static const httpd_uri_t debug_stream_stop_post  = { .uri = "/api/debug_stream/stop",  .method = HTTP_POST, .handler = debug_stream_stop_post_handler };
     httpd_register_uri_handler(s_server, &index_uri);
     httpd_register_uri_handler(s_server, &script_get);
     httpd_register_uri_handler(s_server, &script_post);
@@ -388,6 +424,8 @@ void mruby_webui_start(void)
     httpd_register_uri_handler(s_server, &frontend_post);
     httpd_register_uri_handler(s_server, &sleep_post);
     httpd_register_uri_handler(s_server, &ble_unpair_post);
+    httpd_register_uri_handler(s_server, &debug_stream_start_post);
+    httpd_register_uri_handler(s_server, &debug_stream_stop_post);
 
     ESP_LOGI(TAG, "WebUI listening on port %d", config.server_port);
 #endif

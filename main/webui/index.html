@@ -13,6 +13,11 @@
   #msg { margin: 0.5em 0; font-weight: bold; }
   button { font-size: 14px; padding: 0.4em 1.2em; }
   .hint { color: #888; font-size: 12px; }
+  #debugLog {
+    height: 20vh; overflow-y: auto; box-sizing: border-box;
+    background: #111; color: #0f0; padding: 0.5em;
+    font-family: monospace; font-size: 12px; white-space: pre-wrap;
+  }
 </style>
 </head>
 <body>
@@ -23,8 +28,11 @@
   <button id="save" disabled>Save &amp; reboot</button>
   <button id="sleep">Sleep now</button>
   <button id="bleUnpair">Unpair BLE</button>
+  <button id="debugStart">Start debug stream</button>
+  <button id="debugStop" disabled>Stop debug stream</button>
   <span id="msg"></span>
 </p>
+<pre id="debugLog"></pre>
 <p class="hint">
   Saving writes the mrb_script partition and reboots the board to apply
   it - same effect as bin/upload_mruby_script.py, but over WiFi instead
@@ -50,6 +58,15 @@
   double-blinks while advertising/waiting for a BLE connection (once WiFi
   itself is connected and idle - it takes priority while still connecting).
 </p>
+<p class="hint">
+  "Start debug stream" opens a second, dedicated connection (port
+  <code id="debugPortHint"></code>) that live-streams the script's
+  <code>debug_print(...)</code> calls below. It costs the board a bit of
+  RAM for as long as it's running, so it's opt-in rather than always on -
+  click "Stop debug stream" when done watching to free it back up (it
+  does NOT stop automatically when you navigate away or close this tab).
+  One viewer at a time is the expected use.
+</p>
 
 <script src="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/ruby/ruby.min.js"></script>
@@ -59,7 +76,15 @@ const statusEl = document.getElementById('status');
 const saveBtn = document.getElementById('save');
 const sleepBtn = document.getElementById('sleep');
 const bleUnpairBtn = document.getElementById('bleUnpair');
+const debugStartBtn = document.getElementById('debugStart');
+const debugStopBtn = document.getElementById('debugStop');
+const debugLogEl = document.getElementById('debugLog');
 const msgEl = document.getElementById('msg');
+
+// Keep in sync with main/debug_stream.h's DEBUG_STREAM_PORT.
+const DEBUG_STREAM_PORT = 81;
+document.getElementById('debugPortHint').textContent = DEBUG_STREAM_PORT;
+let debugSource = null; // the active EventSource, or null while stopped
 
 // CodeMirror comes from a CDN (see <script> tags above) - if it didn't
 // load (no internet on this network), fall back to the plain textarea
@@ -157,6 +182,52 @@ bleUnpairBtn.onclick = async () => {
     msgEl.textContent = 'unpair request failed: ' + e;
   }
   bleUnpairBtn.disabled = false;
+};
+
+// Bounded so a long-running stream doesn't grow the page's DOM forever.
+const DEBUG_LOG_MAX_LINES = 500;
+function appendDebugLine(line) {
+  debugLogEl.textContent += line + '\n';
+  const lines = debugLogEl.textContent.split('\n');
+  if (lines.length > DEBUG_LOG_MAX_LINES) {
+    debugLogEl.textContent = lines.slice(lines.length - DEBUG_LOG_MAX_LINES).join('\n');
+  }
+  debugLogEl.scrollTop = debugLogEl.scrollHeight;
+}
+
+debugStartBtn.onclick = async () => {
+  debugStartBtn.disabled = true;
+  try {
+    const res = await fetch('/api/debug_stream/start', { method: 'POST' });
+    const text = await res.text();
+    if (!res.ok) {
+      msgEl.textContent = 'error: ' + text;
+      debugStartBtn.disabled = false;
+      return;
+    }
+    // Separate port = separate origin from this page's own - the board's
+    // debug_stream.c sends Access-Control-Allow-Origin itself so this read
+    // isn't blocked by CORS.
+    debugSource = new EventSource(`http://${location.hostname}:${DEBUG_STREAM_PORT}/stream`);
+    debugSource.onmessage = (ev) => appendDebugLine(ev.data);
+    debugSource.onerror = () => appendDebugLine('[stream error/disconnected]');
+    debugStopBtn.disabled = false;
+  } catch (e) {
+    msgEl.textContent = 'failed to start debug stream: ' + e;
+    debugStartBtn.disabled = false;
+  }
+};
+
+debugStopBtn.onclick = async () => {
+  debugStopBtn.disabled = true;
+  if (debugSource) { debugSource.close(); debugSource = null; }
+  try {
+    const res = await fetch('/api/debug_stream/stop', { method: 'POST' });
+    msgEl.textContent = (await res.text()).trim();
+  } catch (e) {
+    msgEl.textContent = 'stop request failed: ' + e;
+  }
+  debugStartBtn.disabled = false;
 };
 
 loadStatus();

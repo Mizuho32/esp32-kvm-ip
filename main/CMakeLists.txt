@@ -32,6 +32,7 @@ if(KVM_ROLE STREQUAL "HOST")
             "ble_hid_device.c"
             "mruby_ctype_shim.c"
             "mruby_alloc_psram.c"
+            "debug_stream.c"
         INCLUDE_DIRS "."
         EMBED_TXTFILES
             "mruby_scripts/default.rb"

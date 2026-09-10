@@ -24,6 +24,7 @@
 #include "mruby/throw.h"
 
 #include "ble_hid_device.h"
+#include "debug_stream.h"
 #include "hid_forwarder.h"
 #include "mruby_alloc_psram.h"
 // mruby_ctype_shim.c - see mruby_filter_init()'s call to
@@ -205,6 +206,12 @@ static bool s_wifi_fast_reconnect_static_ip_enabled = false;
 // mruby_filter_ble_wifi_off_while_connected()'s doc comment in
 // mruby_filter.h for the tradeoff this makes.
 static bool s_ble_wifi_off_while_connected = false;
+// Gates only debug_print()'s ESP_LOGI (serial console) output - see
+// ruby_debug_print_uart()'s doc comment below. Independent of the WebUI's
+// debug_stream.c destination, which is gated separately (by whether that
+// module's own httpd instance has been Start-ed, not by a script toggle).
+// Defaults to true (unchanged serial-console behavior).
+static bool s_debug_print_uart_enabled = true;
 
 static void reset_dsl_state(void)
 {
@@ -228,6 +235,7 @@ static void reset_dsl_state(void)
     s_wifi_fast_reconnect_static_ip_enabled = false;
     s_ble_sink_declared = false;
     s_ble_wifi_off_while_connected = false;
+    s_debug_print_uart_enabled = true;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -323,14 +331,26 @@ static mrb_value dsl_usb_host_backends(mrb_state *mrb, mrb_value self)
 // `debug_print(*args)` - the only output a script has, since the
 // gembox (components/mruby/esp32s3_build_config.rb) doesn't include
 // mruby-print (no puts/print/p). Each arg is #inspect'd (so Hash/Array/
-// nil/etc. show their contents, not just to_s) and logged via ESP_LOGI -
-// visible in the same `idf.py monitor` console already used for
-// everything else. Deliberately does not touch WebSocket/network output:
-// that would need its own connection lifecycle handling and risks
-// blocking the latency-sensitive mouse dispatch path this is often
-// called from (mds/usb_hid/2026-08-28_mruby_filter_route.md's "一番の
-// リスク" section) - only call this for state changes, not every
-// mouse/keyboard report, or logging itself becomes the bottleneck.
+// nil/etc. show their contents, not just to_s) and sent to two
+// destinations:
+// - ESP_LOGI, the same `idf.py monitor` console already used for
+//   everything else - gated by `debug_print_uart` (default on).
+// - debug_stream_push() (main/debug_stream.c,
+//   mds/usb_hid/2026-09-10_mruby_debug_stream.md) - a non-blocking queue
+//   send, silently dropped if that module's httpd instance hasn't been
+//   Start-ed from the WebUI, so this is cheap to call unconditionally.
+//
+// Neither destination does any actual network I/O from *this* call - the
+// original concern that ruled out network output entirely
+// (mds/usb_hid/2026-08-28_mruby_filter_route.md's "一番のリスク" section:
+// this is often called from the latency-sensitive mouse dispatch path,
+// s_mrb_mutex held, so anything here that could block on a slow/stalled
+// socket would reintroduce exactly the kind of stall that section warns
+// about) is why debug_stream_push() only ever does a 0-tick
+// xQueueSend() - the actual chunked HTTP send happens later, from
+// debug_stream.c's own dedicated task. Still: only call this for state
+// changes, not every mouse/keyboard report, or the sheer call volume
+// becomes the bottleneck regardless of how cheap each call is.
 static mrb_value dsl_debug_print(mrb_state *mrb, mrb_value self)
 {
     (void)self;
@@ -341,7 +361,10 @@ static mrb_value dsl_debug_print(mrb_state *mrb, mrb_value self)
     for (mrb_int i = 0; i < argc; i++) {
         mrb_value s = mrb_funcall(mrb, argv[i], "inspect", 0);
         if (mrb_type(s) == MRB_TT_STRING) {
-            ESP_LOGI(TAG, "script: %s", RSTRING_PTR(s));
+            if (s_debug_print_uart_enabled) {
+                ESP_LOGI(TAG, "script: %s", RSTRING_PTR(s));
+            }
+            debug_stream_push(RSTRING_PTR(s));
         }
     }
     return mrb_nil_value();
@@ -680,6 +703,22 @@ static mrb_value ruby_ble_wifi_off_while_connected(mrb_state *mrb, mrb_value sel
     return mrb_nil_value();
 }
 
+// `debug_print_uart false` - stops debug_print()'s per-call ESP_LOGI
+// output to the serial console (idf.py monitor). Default true (unchanged
+// behavior). Independent of the WebUI's explicit Start/Stop-gated HTTP
+// debug stream (debug_stream.c, mds/usb_hid/2026-09-10_mruby_debug_stream.md) -
+// debug_print() always also pushes to that stream (a cheap non-blocking
+// queue send, silently dropped if the stream isn't currently started),
+// regardless of this toggle.
+static mrb_value ruby_debug_print_uart(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_bool enabled;
+    mrb_get_args(mrb, "b", &enabled);
+    s_debug_print_uart_enabled = enabled;
+    return mrb_nil_value();
+}
+
 // ---- script loading -----------------------------------------------------
 
 // Finds the mrb_script partition and reads/validates just its 4-byte
@@ -774,6 +813,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "usb_suspend_rp2040_sleep", ruby_usb_suspend_rp2040_sleep, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "wifi_fast_reconnect_static_ip", ruby_wifi_fast_reconnect_static_ip, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "debug_print_uart", ruby_debug_print_uart, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
