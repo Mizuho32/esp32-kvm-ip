@@ -29,6 +29,7 @@
   <button id="sleep">Sleep now</button>
   <button id="bleUnpair">Unpair BLE</button>
   <button id="debugToggle" disabled>Start debug stream</button>
+  <button id="debugClear">Clear log</button>
   <span id="msg"></span>
 </p>
 <pre id="debugLog"></pre>
@@ -98,6 +99,7 @@ const saveBtn = document.getElementById('save');
 const sleepBtn = document.getElementById('sleep');
 const bleUnpairBtn = document.getElementById('bleUnpair');
 const debugToggleBtn = document.getElementById('debugToggle');
+const debugClearBtn = document.getElementById('debugClear');
 const debugLogEl = document.getElementById('debugLog');
 const firmwareFileEl = document.getElementById('firmwareFile');
 const firmwareUploadBtn = document.getElementById('firmwareUpload');
@@ -291,6 +293,14 @@ debugToggleBtn.onclick = async () => {
     msgEl.textContent = (starting ? 'start' : 'stop') + ' request failed: ' + e;
     debugToggleBtn.disabled = false;
   }
+};
+
+// Purely local - just empties this tab's own view of the log. Doesn't
+// touch the board at all (there's no server-side backlog to clear, see
+// debug_stream.c's "no backlog kept" design), so it doesn't affect other
+// viewers or what a fresh page load shows.
+debugClearBtn.onclick = () => {
+  debugLogEl.textContent = '';
 };
 
 firmwareFileEl.onchange = () => {
