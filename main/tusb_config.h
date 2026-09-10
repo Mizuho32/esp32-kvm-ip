@@ -23,7 +23,7 @@
 #define CFG_TUD_ENDPOINT0_SIZE  64
 
 // Enabled device classes
-#define CFG_TUD_HID             3   // Boot Keyboard (itf 0) + Boot Mouse (itf 1) + Consumer Control (itf 2)
+#define CFG_TUD_HID             4   // Boot Keyboard (itf 0) + Boot Mouse (itf 1) + Consumer Control (itf 2) + System Control (itf 3)
 #define CFG_TUD_CDC             0
 #define CFG_TUD_MSC             0
 #define CFG_TUD_MIDI            0

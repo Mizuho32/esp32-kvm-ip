@@ -70,7 +70,16 @@ extern const uint8_t mruby_default_script_end[]   asm("_binary_default_rb_end");
 #define MRB_DSL_MAX_SINKS  8
 #define MRB_DSL_MAX_STAGES 6
 
-enum { PIPE_KEYBOARD, PIPE_MOUSE, PIPE_CONSUMER, PIPE_KIND_COUNT };
+// PIPE_SYSTEM_CONTROL is a `sink`/kind: tag only - unlike the other three,
+// nothing ever builds an actual s_pipelines[PIPE_SYSTEM_CONTROL]/
+// s_net_pipelines[PIPE_SYSTEM_CONTROL] via from()/to()/branch() (there's
+// no physical device this project reads that ever produces a System
+// Control event, so no `source ..., kind: :system_control` makes sense -
+// see dsl_system_control()'s doc comment). Included in this enum anyway
+// so kind_from_symbol_value()/dsl_sink()'s existing event_kind_hint
+// validation covers it for free, at the cost of two permanently-unused
+// (but tiny) pipeline_t slots.
+enum { PIPE_KEYBOARD, PIPE_MOUSE, PIPE_CONSUMER, PIPE_SYSTEM_CONTROL, PIPE_KIND_COUNT };
 
 typedef enum { SINK_TYPEC, SINK_UDP, SINK_BLE } sink_kind_t;
 
@@ -298,13 +307,14 @@ static mrb_value invoke_block(mrb_state *mrb, mrb_value block, mrb_int argc, con
 static int kind_from_symbol_value(mrb_state *mrb, mrb_value v, const char *what)
 {
     if (mrb_type(v) != MRB_TT_SYMBOL) {
-        mrb_raisef(mrb, E_ARGUMENT_ERROR, "%s: kind: must be a symbol (:keyboard/:mouse/:consumer)", what);
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "%s: kind: must be a symbol (:keyboard/:mouse/:consumer/:system_control)", what);
     }
     const char *name = mrb_sym_name(mrb, mrb_symbol(v));
     if (strcmp(name, "keyboard") == 0) return PIPE_KEYBOARD;
     if (strcmp(name, "mouse") == 0) return PIPE_MOUSE;
     if (strcmp(name, "consumer") == 0) return PIPE_CONSUMER;
-    mrb_raisef(mrb, E_ARGUMENT_ERROR, "%s: unknown kind :%s (expected :keyboard/:mouse/:consumer)", what, name);
+    if (strcmp(name, "system_control") == 0) return PIPE_SYSTEM_CONTROL;
+    mrb_raisef(mrb, E_ARGUMENT_ERROR, "%s: unknown kind :%s (expected :keyboard/:mouse/:consumer/:system_control)", what, name);
     return -1; // unreachable, mrb_raisef() is mrb_noreturn
 }
 
@@ -399,6 +409,44 @@ static sink_def_t *find_sink(mrb_state *mrb, mrb_sym name)
     }
     mrb_raisef(mrb, E_ARGUMENT_ERROR, "unknown sink :%s (not declared with sink(...))", mrb_sym_name(mrb, name));
     return NULL; // unreachable
+}
+
+// `:power_down`/`:sleep`/`:wake_up` -> the raw HID Usage ID on the
+// Generic Desktop page (0x01) - see class/hid/hid.h's
+// HID_USAGE_DESKTOP_SYSTEM_POWER_DOWN/SLEEP/WAKE_UP (0x81/0x82/0x83, not
+// pulled in by name here just for 3 constants). Threaded through exactly
+// like Consumer Control's usage_id (send_consumer_to_sink() etc. below) -
+// only usb_device_typec_system_control_report()/
+// ble_hid_device_system_control_report() convert this into the actual
+// wire report's 2-bit Array field value (1/2/3, 0 = idle) at the last
+// hop. See dsl_system_control()'s doc comment.
+static uint16_t system_control_usage_from_symbol(mrb_state *mrb, mrb_value v)
+{
+    if (mrb_type(v) != MRB_TT_SYMBOL) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: first argument must be a symbol (:power_down/:sleep/:wake_up)");
+    }
+    const char *name = mrb_sym_name(mrb, mrb_symbol(v));
+    if (strcmp(name, "power_down") == 0) return 0x81;
+    if (strcmp(name, "sleep") == 0) return 0x82;
+    if (strcmp(name, "wake_up") == 0) return 0x83;
+    mrb_raisef(mrb, E_ARGUMENT_ERROR,
+               "system_control: unknown usage :%s (expected :power_down/:sleep/:wake_up)", name);
+    return 0; // unreachable
+}
+
+// Same dispatch shape as send_consumer_to_sink() (below, next to
+// dispatch_consumer_via()) - kept here instead since dsl_system_control()
+// (which needs it) comes much earlier in this file than that section, and
+// this has no dependency on the pipeline/dispatch machinery those share.
+static void send_system_control_to_sink(sink_def_t *sink, uint16_t usage_id)
+{
+    if (sink->kind == SINK_TYPEC) {
+        usb_device_typec_system_control_report(usage_id);
+    } else if (sink->kind == SINK_BLE) {
+        ble_hid_device_system_control_report(usage_id);
+    } else if (sink->udp_resolved) {
+        hid_forwarder_send_system_control_to(&sink->udp_addr, usage_id);
+    }
 }
 
 // ---- DSL methods: source / sink / pipeline / from / to / branch ------
@@ -617,6 +665,65 @@ static mrb_value dsl_pipeline(mrb_state *mrb, mrb_value self)
     }
     s_building = false;
     s_building_net = false;
+    return mrb_nil_value();
+}
+
+// `system_control(:sleep, :sink1, :sink2, ...)` - fires a momentary
+// System Control action (Power Down/Sleep/Wake Up) at named sinks right
+// now. Deliberately NOT part of the source/sink/pipeline/from/to/branch
+// model above: that whole model exists to filter/route events that
+// arrive from somewhere (a real USB device, or the network) - but no
+// physical keyboard/mouse this project reads ever produces a System
+// Control event in the first place (there's no dedicated Sleep key to
+// read), so there's nothing to filter. A script fires this directly,
+// typically from a :keyboard pipeline's branch() block on detecting some
+// chosen key combo (mds/usb_hid/2026-09-10_system_control_sleep.md's
+// motivating use case: the target PC reacts to a hardware Sleep button
+// this keyboard doesn't have).
+//
+// Sends the requested usage to every named sink, waits
+// SYSTEM_CONTROL_PULSE_MS, then sends an idle (usage_id 0) report to the
+// same sinks - callers never need to track press/release themselves,
+// every call fires one clean momentary pulse (mirrors a human pressing
+// and releasing a physical System Control button). Named sinks must have
+// been declared with `kind: :system_control` (or no kind: at all - see
+// dsl_sink()'s event_kind_hint).
+#define SYSTEM_CONTROL_PULSE_MS 20
+
+static mrb_value dsl_system_control(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    const mrb_value *argv;
+    mrb_int argc;
+    mrb_get_args(mrb, "*", &argv, &argc);
+    if (argc < 1) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: usage symbol required (:power_down/:sleep/:wake_up)");
+    }
+    uint16_t usage_id = system_control_usage_from_symbol(mrb, argv[0]);
+
+    if (argc - 1 > MRB_DSL_MAX_SINKS) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: too many sink names");
+    }
+    sink_def_t *sinks[MRB_DSL_MAX_SINKS];
+    int sink_count = 0;
+    for (mrb_int i = 1; i < argc; i++) {
+        if (mrb_type(argv[i]) != MRB_TT_SYMBOL) {
+            mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: sink names must be symbols");
+        }
+        sink_def_t *sink = find_sink(mrb, mrb_symbol(argv[i]));
+        if (sink->event_kind_hint != -1 && sink->event_kind_hint != PIPE_SYSTEM_CONTROL) {
+            mrb_raisef(mrb, E_ARGUMENT_ERROR, "system_control: sink :%s was declared for a different kind", mrb_sym_name(mrb, sink->name));
+        }
+        sinks[sink_count++] = sink;
+    }
+
+    for (int i = 0; i < sink_count; i++) {
+        send_system_control_to_sink(sinks[i], usage_id);
+    }
+    vTaskDelay(pdMS_TO_TICKS(SYSTEM_CONTROL_PULSE_MS));
+    for (int i = 0; i < sink_count; i++) {
+        send_system_control_to_sink(sinks[i], 0);
+    }
     return mrb_nil_value();
 }
 
@@ -933,6 +1040,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "from",     dsl_from,     MRB_ARGS_ARG(1, 1));
     mrb_define_method(mrb, k, "to",       dsl_to,       MRB_ARGS_REST() | MRB_ARGS_BLOCK());
     mrb_define_method(mrb, k, "branch",   dsl_branch,   MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
+    mrb_define_method(mrb, k, "system_control", dsl_system_control, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "usb_host_backends", dsl_usb_host_backends, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "debug_print", dsl_debug_print, MRB_ARGS_REST());
 }

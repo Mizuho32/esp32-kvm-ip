@@ -56,4 +56,16 @@ void hid_forwarder_send_keyboard_to(const struct sockaddr_in *dest, uint8_t modi
 void hid_forwarder_send_mouse_to(const struct sockaddr_in *dest, uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan);
 void hid_forwarder_send_consumer_to(const struct sockaddr_in *dest, uint16_t usage_id);
 
+/** Send a System Control event (raw HID Usage ID 0x81/0x82/0x83, 0 =
+ * idle/release) over UDP to an arbitrary destination - used by
+ * mruby_filter.c's `system_control :sleep, ...` DSL call when one of the
+ * named sinks is a `sink :name, :udp, ...`. Unlike
+ * hid_forwarder_consumer() there's no matching "as if read from local
+ * hardware" entry point for this: nothing this project reads from a
+ * physical device ever produces a System Control event, so this is only
+ * ever reached via mruby_filter.c's direct sink dispatch, never
+ * hid_forwarder.c's own per-report paths - see
+ * mds/usb_hid/2026-09-10_system_control_sleep.md. */
+void hid_forwarder_send_system_control_to(const struct sockaddr_in *dest, uint16_t usage_id);
+
 #endif

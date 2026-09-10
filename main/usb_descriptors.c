@@ -80,6 +80,16 @@ static const uint8_t s_hid_report_descriptor_consumer[] = {
     TUD_HID_REPORT_DESC_CONSUMER(),
 };
 
+// System Control (Power Down/Sleep/Wake Up) - Report Protocol only, same
+// as Consumer Control above. TinyUSB's own template
+// (class/hid/hid_device.h's TUD_HID_REPORT_DESC_SYSTEM_CONTROL()) already
+// matches exactly what's needed here (a 2-bit Array field selecting one
+// of the three usages, value 0 = none pressed) - see usb_descriptors.h's
+// system_control_report_t.
+static const uint8_t s_hid_report_descriptor_system_control[] = {
+    TUD_HID_REPORT_DESC_SYSTEM_CONTROL(),
+};
+
 // ═══════════════════════════════════════════════════════════════════
 //  DEVICE DESCRIPTOR
 // ═══════════════════════════════════════════════════════════════════
@@ -108,6 +118,7 @@ tusb_desc_device_t s_device_descriptor = {
 #define EPNUM_HID_KEYBOARD 0x81
 #define EPNUM_HID_MOUSE    0x82
 #define EPNUM_HID_CONSUMER 0x83
+#define EPNUM_HID_SYSCTL   0x84
 #define HID_POLL_INTERVAL  1
 
 // Mouse endpoint must fit the larger of the two formats it sends
@@ -115,7 +126,7 @@ tusb_desc_device_t s_device_descriptor = {
 #define MOUSE_EP_SIZE (sizeof(mouse_report_t) > sizeof(hid_mouse_report_t) \
                        ? sizeof(mouse_report_t) : sizeof(hid_mouse_report_t))
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN * 3)
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN * 4)
 
 const uint8_t s_configuration_descriptor[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN,
@@ -139,6 +150,12 @@ const uint8_t s_configuration_descriptor[] = {
     TUD_HID_DESCRIPTOR(ITF_NUM_CONSUMER, 0, HID_ITF_PROTOCOL_NONE,
                        sizeof(s_hid_report_descriptor_consumer),
                        EPNUM_HID_CONSUMER, sizeof(consumer_report_t),
+                       HID_POLL_INTERVAL),
+
+    // System Control interface - not Boot-capable (protocol = NONE)
+    TUD_HID_DESCRIPTOR(ITF_NUM_SYSCTL, 0, HID_ITF_PROTOCOL_NONE,
+                       sizeof(s_hid_report_descriptor_system_control),
+                       EPNUM_HID_SYSCTL, sizeof(system_control_report_t),
                        HID_POLL_INTERVAL),
 };
 
@@ -179,6 +196,7 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {
         case ITF_NUM_KEYBOARD: return s_hid_report_descriptor_keyboard;
         case ITF_NUM_MOUSE:    return s_hid_report_descriptor_mouse;
         case ITF_NUM_CONSUMER: return s_hid_report_descriptor_consumer;
+        case ITF_NUM_SYSCTL:   return s_hid_report_descriptor_system_control;
         default:                return NULL;
     }
 }

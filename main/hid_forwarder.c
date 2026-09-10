@@ -145,6 +145,17 @@ void hid_forwarder_send_consumer_to(const struct sockaddr_in *dest, uint16_t usa
     send_udp_packet_to(&pkt, dest);
 }
 
+void hid_forwarder_send_system_control_to(const struct sockaddr_in *dest, uint16_t usage_id)
+{
+    udp_packet_t pkt = {
+        .magic    = PACKET_MAGIC,
+        .sequence = ++s_seq,
+        .type     = EVENT_TYPE_SYSTEM_CONTROL,
+    };
+    pkt.system_control.usage_id = usage_id;
+    send_udp_packet_to(&pkt, dest);
+}
+
 static void send_keyboard_report_raw(uint8_t modifiers, const uint8_t keycodes[6])
 {
     hid_forwarder_send_keyboard_to(&s_target_addr, modifiers, keycodes);

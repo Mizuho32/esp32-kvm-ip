@@ -35,6 +35,34 @@
                      # Time#localtime takes no arguments, unlike MRI's - see
                      # mds/usb_hid/2026-09-10_ntp_sync.md's follow-up)
 
+# System Control (Power Down/Sleep/Wake Up) example - fires a momentary
+# action at whichever sinks you name, for a keyboard shortcut this
+# board's physical keyboard has no dedicated key for (e.g. the target PC
+# reacts to a hardware Sleep button). Not a source/sink/pipeline "kind"
+# like keyboard/mouse/consumer above - nothing ever reads this from real
+# hardware, a script only ever *sends* it, typically from a :keyboard
+# pipeline watching for some chosen combo. See
+# mds/usb_hid/2026-09-10_system_control_sleep.md.
+#
+# 1) declare a sink per output you want it to reach:
+#    sink :sysctl_typec, :typec, kind: :system_control
+#    sink :sysctl_ble,   :ble,   kind: :system_control
+#
+# 2) in the `pipeline :keyboard do ... end` block below, replace its
+#    `to :typec_kbd` line (currently a plain no-block passthrough) with a
+#    block form that watches every report and fires the action as a side
+#    effect - swallowing the combo itself (returning nil) so it doesn't
+#    also get typed as ordinary keystrokes. Adjust the combo to taste -
+#    this example is left-Ctrl+left-Alt+S (modifiers bit0|bit2 = 0x05,
+#    keycode 0x16 = S):
+#    to(:typec_kbd) { |ev|
+#      if ev[:modifiers] & 0x05 == 0x05 && ev[:keycodes].include?(0x16)
+#        system_control :sleep, :sysctl_typec, :sysctl_ble
+#        next nil
+#      end
+#      ev
+#    }
+
 # wifi_fast_reconnect_static_ip true   # uncomment to enable - default is false (every boot does a
                                        # real DHCP handshake; enabling this skips it once a cached
                                        # IP exists, which breaks hostname/DNS resolution on the

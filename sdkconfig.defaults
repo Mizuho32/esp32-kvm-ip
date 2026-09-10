@@ -25,8 +25,10 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # task "main"'s stack is freed once app_main() returns.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
-# USB OTG (ESP32-S3 native USB)
-CONFIG_TINYUSB_HID_COUNT=3
+# USB OTG (ESP32-S3 native USB) - Boot Keyboard + Boot Mouse + Consumer
+# Control + System Control (Power Down/Sleep/Wake Up, see
+# mds/usb_hid/2026-09-10_system_control_sleep.md)
+CONFIG_TINYUSB_HID_COUNT=4
 
 # Boards like Seeed XIAO ESP32S3 expose only a single USB-C port wired to
 # the native USB pins (GPIO19/20). Once TinyUSB claims that port as the

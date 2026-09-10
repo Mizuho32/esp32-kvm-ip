@@ -6,14 +6,16 @@
 #include "tusb.h"
 #include "class/hid/hid_device.h"
 
-// Three HID interfaces. Keyboard and Mouse are Boot Protocol capable;
-// Consumer Control is Report-protocol only (BIOS never needs media keys).
-// TinyUSB HID class-driver "instance" numbers are assigned in interface
-// order, so these double as both interface numbers and instance indices.
+// Four HID interfaces. Keyboard and Mouse are Boot Protocol capable;
+// Consumer Control and System Control are Report-protocol only (BIOS
+// never needs media keys or a software Sleep button). TinyUSB HID
+// class-driver "instance" numbers are assigned in interface order, so
+// these double as both interface numbers and instance indices.
 #define ITF_NUM_KEYBOARD 0
 #define ITF_NUM_MOUSE    1
 #define ITF_NUM_CONSUMER 2
-#define ITF_NUM_TOTAL    3
+#define ITF_NUM_SYSCTL   3
+#define ITF_NUM_TOTAL    4
 
 // ── Report layouts ───────────────────────────────────────────────
 //
@@ -51,6 +53,26 @@ typedef struct __attribute__((packed)) {
 } consumer_report_t;    // 2 bytes
 
 _Static_assert(sizeof(consumer_report_t) == 2, "Consumer report must be 2 bytes");
+
+// System Control (Generic Desktop page 0x01, Power Down/Sleep/Wake Up) -
+// see mds/usb_hid/2026-09-10_system_control_sleep.md. Unlike the other
+// three interfaces, no physical device this project reads from ever
+// produces this - it only ever originates from an mruby script calling
+// `system_control :sleep, ...` (mruby_filter.c), typically from a
+// :keyboard pipeline branch() watching for a key combo a real keyboard
+// doesn't have a dedicated key for.
+typedef struct __attribute__((packed)) {
+    // TUD_HID_REPORT_DESC_SYSTEM_CONTROL()'s 2-bit Array field value, NOT
+    // the raw HID Usage ID - 0 = idle, 1 = Power Down, 2 = Sleep, 3 = Wake
+    // Up (usage_id_to_array_value() in usb_device_typec.c/ble_hid_device.c
+    // does that mapping right before building this struct; every other
+    // layer - protocol.h's udp_packet_t/hid_event_t, mruby_filter.c's
+    // system_control() - carries the actual 0x81/0x82/0x83 usage ID
+    // instead, same convention as consumer_report_t's usage_id above).
+    uint8_t value;
+} system_control_report_t; // 1 byte
+
+_Static_assert(sizeof(system_control_report_t) == 1, "System Control report must be 1 byte");
 
 // USB descriptors (defined in usb_descriptors.c)
 extern tusb_desc_device_t s_device_descriptor;

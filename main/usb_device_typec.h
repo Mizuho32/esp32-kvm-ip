@@ -70,4 +70,10 @@ void usb_device_typec_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8
  * Consumer interface. No-op if not connected. */
 void usb_device_typec_consumer_report(uint16_t usage_id);
 
+/** Sends a System Control report (Power Down/Sleep/Wake Up, raw HID
+ * Usage ID 0x81/0x82/0x83, 0 = idle/release - see usb_descriptors.h's
+ * system_control_report_t) on the type-c HID System Control interface.
+ * No-op if not connected. */
+void usb_device_typec_system_control_report(uint16_t usage_id);
+
 #endif

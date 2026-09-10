@@ -37,6 +37,10 @@ static void process_udp_packet(const udp_packet_t *pkt)
             event.consumer.usage_id = pkt->consumer.usage_id;
             break;
 
+        case EVENT_TYPE_SYSTEM_CONTROL:
+            event.system_control.usage_id = pkt->system_control.usage_id;
+            break;
+
         default:
             return;
     }

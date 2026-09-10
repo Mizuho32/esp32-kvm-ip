@@ -46,15 +46,15 @@
 #define CFG_TUSB_OS             OPT_OS_FREERTOS
 
 // ── rhport0: Device (type-c output, main/usb_device_typec.c) ──────────
-// Single HID interface set (keyboard/mouse/Consumer Control - see
-// main/usb_descriptors.h, reused as-is from the Device role). Values
-// mirror what espressif/esp_tinyusb's own Kconfig-driven config would
-// produce for that descriptor set - not going through esp_tinyusb's
-// Kconfig here since this is a plain compile-time header, but
-// usb_device_typec.c *does* still go through esp_tinyusb's
+// Single HID interface set (keyboard/mouse/Consumer Control/System
+// Control - see main/usb_descriptors.h, reused as-is from the Device
+// role). Values mirror what espressif/esp_tinyusb's own Kconfig-driven
+// config would produce for that descriptor set - not going through
+// esp_tinyusb's Kconfig here since this is a plain compile-time header,
+// but usb_device_typec.c *does* still go through esp_tinyusb's
 // tinyusb_driver_install() at runtime (see that file for why).
 #define CFG_TUD_ENDPOINT0_SIZE  64
-#define CFG_TUD_HID             3
+#define CFG_TUD_HID             4
 #define CFG_TUD_HID_EP_BUFSIZE  64
 #define CFG_TUD_CDC             0
 #define CFG_TUD_MSC             0

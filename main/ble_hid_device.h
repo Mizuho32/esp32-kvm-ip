@@ -29,6 +29,11 @@
  *     usb_descriptors.c's Report Protocol mouse descriptor.
  *   - Report ID 3: Consumer Control (media keys), 16-bit usage code - 2
  *     bytes, same as TinyUSB's TUD_HID_REPORT_DESC_CONSUMER().
+ *   - Report ID 4: System Control (Power Down/Sleep/Wake Up), 1 byte -
+ *     same 2-bit Array field encoding as TinyUSB's
+ *     TUD_HID_REPORT_DESC_SYSTEM_CONTROL() (usb_descriptors.c). Unlike
+ *     the other three, no physical device this project reads from ever
+ *     produces this - see mds/usb_hid/2026-09-10_system_control_sleep.md.
  *
  * Pairing is Just Works (no PIN/passkey, no on-device UI at all - see
  * esp_hid_gap.c's esp_hid_ble_gap_adv_init()) - entirely driven from the
@@ -64,6 +69,12 @@ void ble_hid_device_mouse_report(uint8_t buttons, int16_t dx, int16_t dy, int8_t
 
 /** Sends a Consumer Control report (Report ID 3). No-op if not connected. */
 void ble_hid_device_consumer_report(uint16_t usage_id);
+
+/** Sends a System Control report (Report ID 4) - raw HID Usage ID
+ * 0x81/0x82/0x83 (Power Down/Sleep/Wake Up), 0 = idle/release, same
+ * convention as ble_hid_device_consumer_report()'s usage_id. No-op if not
+ * connected. */
+void ble_hid_device_system_control_report(uint16_t usage_id);
 
 /**
  * Forgets the current bond (if any) and disconnects, so a different PC
