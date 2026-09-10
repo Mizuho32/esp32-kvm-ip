@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -731,6 +732,45 @@ static mrb_value ruby_ntp_sync(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `timezone "JST-9"` - a POSIX TZ string (fixed offset - "JST-9" for
+// Japan, no DST; ESP-IDF's newlib has no zoneinfo database, so IANA names
+// like "Asia/Tokyo" don't work here, only the POSIX
+// std-offset[dst[offset][,rule]] form). Applied immediately
+// (setenv()+tzset()), unlike ntp_sync - this has no network dependency,
+// so there's no reason to defer it to WiFi connect time.
+//
+// Motivation: mruby-time's Time#localtime takes *no* arguments
+// (MRB_ARGS_NONE() in components/mruby/mruby/mrbgems/mruby-time/src/time.c -
+// unlike MRI's Time#localtime(utc_offset=nil)) - it's a bare wrapper
+// around libc's localtime_r(), so without a TZ set it's silently
+// identical to Time#gmtime (both read UTC - see
+// mds/usb_hid/2026-09-10_ntp_sync.md's follow-up on this). Setting TZ
+// here is what actually makes it return real local time. Default: unset
+// (UTC, ESP-IDF's own default).
+static mrb_value ruby_timezone(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    const char *tz;
+    mrb_int len;
+    mrb_get_args(mrb, "s", &tz, &len);
+    // setenv() needs a NUL-terminated C string - mrb_get_args("s", ...)
+    // only guarantees len bytes are valid, not necessarily NUL-terminated -
+    // copy through a bounded local buffer first, same reasoning as
+    // ruby_hostname()/ruby_ntp_sync() above.
+    char buf[64];
+    if (len < 0) {
+        len = 0;
+    }
+    if ((size_t)len >= sizeof(buf)) {
+        len = sizeof(buf) - 1;
+    }
+    memcpy(buf, tz, (size_t)len);
+    buf[len] = '\0';
+    setenv("TZ", buf, 1);
+    tzset();
+    return mrb_nil_value();
+}
+
 // `ble_wifi_off_while_connected true` - see
 // mruby_filter_ble_wifi_off_while_connected()'s doc comment in
 // mruby_filter.h. Default false (WiFi/WebUI stay up regardless of BLE
@@ -884,6 +924,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "usb_suspend_rp2040_sleep", ruby_usb_suspend_rp2040_sleep, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "wifi_fast_reconnect_static_ip", ruby_wifi_fast_reconnect_static_ip, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ntp_sync", ruby_ntp_sync, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "timezone", ruby_timezone, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));

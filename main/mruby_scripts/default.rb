@@ -29,6 +29,12 @@
                             # real date/time instead of a boot-relative duration - see
                             # mds/usb_hid/2026-09-10_ntp_sync.md
 
+# timezone "JST-9"   # uncomment to set - default is unset (UTC). POSIX TZ string (fixed
+                     # offset only, no zoneinfo database here - "JST-9" for Japan, not
+                     # "Asia/Tokyo"). Time#localtime is a no-op without this (mruby's
+                     # Time#localtime takes no arguments, unlike MRI's - see
+                     # mds/usb_hid/2026-09-10_ntp_sync.md's follow-up)
+
 # wifi_fast_reconnect_static_ip true   # uncomment to enable - default is false (every boot does a
                                        # real DHCP handshake; enabling this skips it once a cached
                                        # IP exists, which breaks hostname/DNS resolution on the
