@@ -200,6 +200,16 @@ static bool s_ble_sink_declared;
 // mruby_filter_wifi_fast_reconnect_static_ip_enabled()'s doc comment in
 // mruby_filter.h for why that's the safer default.
 static bool s_wifi_fast_reconnect_static_ip_enabled = false;
+// Read by wifi_manager.c (weak-symbol lookup, same reasoning as
+// s_wifi_reconnect_restart_after above) to decide whether/where to start
+// SNTP once WiFi first connects - see mruby_filter_ntp_server()'s doc
+// comment in mruby_filter.h. Unset (NULL) by default: not every script
+// cares about Time.now/wall-clock time, so this is opt-in rather than one
+// more always-on background network client - same s_hostname/s_hostname_set
+// pattern as ruby_hostname()/mruby_filter_hostname() below (a string the
+// script may or may not have set, not a plain bool).
+static char s_ntp_server[64];
+static bool s_ntp_server_set;
 // Read by ble_hid_device.c (mruby_filter.c is always compiled alongside
 // it, no weak-symbol lookup needed here - same reasoning as
 // s_ble_sink_declared above). Defaults to false (opt-in) - see
@@ -239,6 +249,7 @@ static void reset_dsl_state(void)
     s_ble_wifi_off_while_connected = false;
     s_debug_print_uart_enabled = true;
     s_debug_print_http_enabled = false;
+    s_ntp_server_set = false;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -698,6 +709,28 @@ static mrb_value ruby_wifi_fast_reconnect_static_ip(mrb_state *mrb, mrb_value se
     return mrb_nil_value();
 }
 
+// `ntp_sync "pool.ntp.org"` - see mruby_filter_ntp_server()'s doc comment
+// in mruby_filter.h. Disabled unless the script calls this (unlike
+// hostname's own string-arg pattern above, there's no free-standing
+// "enabled" concept separate from having a server to sync against).
+static mrb_value ruby_ntp_sync(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    const char *server;
+    mrb_int len;
+    mrb_get_args(mrb, "s", &server, &len);
+    if (len < 0) {
+        len = 0;
+    }
+    if ((size_t)len >= sizeof(s_ntp_server)) {
+        len = sizeof(s_ntp_server) - 1;
+    }
+    memcpy(s_ntp_server, server, (size_t)len);
+    s_ntp_server[len] = '\0';
+    s_ntp_server_set = true;
+    return mrb_nil_value();
+}
+
 // `ble_wifi_off_while_connected true` - see
 // mruby_filter_ble_wifi_off_while_connected()'s doc comment in
 // mruby_filter.h. Default false (WiFi/WebUI stay up regardless of BLE
@@ -850,6 +883,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "wifi_reconnect_restart_after", ruby_wifi_reconnect_restart_after, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "usb_suspend_rp2040_sleep", ruby_usb_suspend_rp2040_sleep, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "wifi_fast_reconnect_static_ip", ruby_wifi_fast_reconnect_static_ip, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "ntp_sync", ruby_ntp_sync, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
@@ -985,6 +1019,11 @@ bool mruby_filter_usb_suspend_rp2040_sleep_enabled(void)
 bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void)
 {
     return s_wifi_fast_reconnect_static_ip_enabled;
+}
+
+const char *mruby_filter_ntp_server(void)
+{
+    return s_ntp_server_set ? s_ntp_server : NULL;
 }
 
 bool mruby_filter_ble_sink_declared(void)

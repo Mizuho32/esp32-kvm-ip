@@ -24,6 +24,11 @@
                                 # needs the WebUI's "Start debug stream" button clicked to
                                 # actually reach a browser - see mds/usb_hid/2026-09-10_mruby_debug_stream.md)
 
+# ntp_sync "pool.ntp.org"   # uncomment to enable - default is disabled (no server set).
+                            # SNTP sync once WiFi first connects, so Time.now etc. report the
+                            # real date/time instead of a boot-relative duration - see
+                            # mds/usb_hid/2026-09-10_ntp_sync.md
+
 # wifi_fast_reconnect_static_ip true   # uncomment to enable - default is false (every boot does a
                                        # real DHCP handshake; enabling this skips it once a cached
                                        # IP exists, which breaks hostname/DNS resolution on the

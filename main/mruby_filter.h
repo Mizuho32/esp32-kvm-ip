@@ -112,6 +112,18 @@ int mruby_filter_wifi_reconnect_restart_after(void);
 // assignment step is affected by this toggle).
 bool mruby_filter_wifi_fast_reconnect_static_ip_enabled(void);
 
+// The script may call `ntp_sync "pool.ntp.org"` (any NTP server hostname)
+// to have wifi_manager.c start SNTP time sync once, right after the
+// first successful WiFi connection (mds/usb_hid/2026-09-10_ntp_sync.md).
+// Without it, the chip's RTC starts counting from 0 at boot, so
+// mruby's Time.now (and anything else that reads wall-clock time) reports
+// an epoch-relative duration since boot, not the real date/time - this is
+// what motivated adding this at all. Returns NULL if the script never
+// called this - defaults to *disabled*: not every script cares about
+// Time.now/wall-clock time, so this is opt-in rather than one more
+// always-on background network client.
+const char *mruby_filter_ntp_server(void);
+
 // True if the loaded script declared at least one `sink :name, :ble`
 // (see dsl_sink()). main_host.c calls ble_hid_device_start() only when
 // this is true - a board whose script never declares a :ble sink never

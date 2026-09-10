@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
@@ -75,6 +76,22 @@ static bool wifi_fast_reconnect_static_ip_enabled(void)
     return false;
 }
 
+// Same weak-symbol reasoning as above - see mruby_filter_ntp_server()'s
+// doc comment in mruby_filter.h. Returns NULL (disabled) both when the
+// script never called `ntp_sync "..."` and, same as
+// wifi_fast_reconnect_static_ip, on KVM_ROLE=DEVICE builds (no
+// mruby_filter.c at all - nothing to opt in with, so this stays off
+// rather than picking a server on the script's behalf).
+extern const char *mruby_filter_ntp_server(void) __attribute__((weak));
+
+static const char *ntp_server(void)
+{
+    if (mruby_filter_ntp_server) {
+        return mruby_filter_ntp_server();
+    }
+    return NULL;
+}
+
 EventGroupHandle_t wifi_event_group;
 static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
@@ -87,6 +104,7 @@ static bool s_protocol_downgraded = false;
 // just goes off while retrying, no blink - see event_handler()'s
 // WIFI_EVENT_STA_DISCONNECTED branch).
 static bool s_ever_connected = false;
+static bool s_ntp_started = false; // see event_handler()'s IP_EVENT_STA_GOT_IP branch
 // Set by wifi_manager_suspend(), cleared by wifi_manager_resume() - tells
 // event_handler's WIFI_EVENT_STA_DISCONNECTED branch that esp_wifi_stop()
 // itself is the cause, not a real drop, so it should skip the
@@ -284,6 +302,32 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         esp_err_t ota_err = esp_ota_mark_app_valid_cancel_rollback();
         if (ota_err != ESP_OK && ota_err != ESP_ERR_NOT_FOUND) {
             ESP_LOGW(TAG, "esp_ota_mark_app_valid_cancel_rollback() failed: %s", esp_err_to_name(ota_err));
+        }
+
+        // mds/usb_hid/2026-09-10_ntp_sync.md: without this, the chip's RTC
+        // starts counting from 0 at boot (no battery-backed clock), so
+        // anything reading wall-clock time (mruby's Time.now, in
+        // particular - this is what surfaced it) reports a boot-relative
+        // duration rather than the real date/time. Disabled unless the
+        // script opts in with `ntp_sync "<server>"` (ntp_server() above) -
+        // not every script cares about Time.now, so this isn't one more
+        // always-on background network client by default. Started once,
+        // not re-initialized on every reconnect (s_ntp_started below) -
+        // esp_netif_sntp's own background client keeps re-syncing
+        // periodically (LWIP_SNTP_UPDATE_DELAY, default 1h) on its own
+        // once running, no further attention needed here. UTC only - no
+        // timezone/DST handling (Time.now's fields are UTC-based unless a
+        // script sets TZ itself; out of scope for what was actually asked).
+        const char *server = ntp_server();
+        if (!s_ntp_started && server != NULL) {
+            s_ntp_started = true;
+            esp_sntp_config_t sntp_cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(server);
+            esp_err_t sntp_err = esp_netif_sntp_init(&sntp_cfg);
+            if (sntp_err != ESP_OK) {
+                ESP_LOGW(TAG, "esp_netif_sntp_init() failed: %s", esp_err_to_name(sntp_err));
+            } else {
+                ESP_LOGI(TAG, "NTP sync started (%s)", server);
+            }
         }
     }
 }
