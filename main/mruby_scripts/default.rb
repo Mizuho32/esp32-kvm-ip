@@ -20,9 +20,9 @@
 # usb_suspend_rp2040_sleep true   # uncomment to enable - default is false (unverified on real
                                   # hardware yet - see mds/usb_hid/2026-08-31_rp2040_sleep_plan.md)
 
-# debug_print_uart false   # uncomment to disable - default is true (debug_print(...) output also
-                          # always goes to the WebUI's Start/Stop-gated debug stream regardless
-                          # of this - see mds/usb_hid/2026-09-10_mruby_debug_stream.md)
+# debug_print_to :uart, :http   # uncomment to override - default is :uart only (:http also
+                                # needs the WebUI's "Start debug stream" button clicked to
+                                # actually reach a browser - see mds/usb_hid/2026-09-10_mruby_debug_stream.md)
 
 # wifi_fast_reconnect_static_ip true   # uncomment to enable - default is false (every boot does a
                                        # real DHCP handshake; enabling this skips it once a cached

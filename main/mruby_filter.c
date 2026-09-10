@@ -206,12 +206,14 @@ static bool s_wifi_fast_reconnect_static_ip_enabled = false;
 // mruby_filter_ble_wifi_off_while_connected()'s doc comment in
 // mruby_filter.h for the tradeoff this makes.
 static bool s_ble_wifi_off_while_connected = false;
-// Gates only debug_print()'s ESP_LOGI (serial console) output - see
-// ruby_debug_print_uart()'s doc comment below. Independent of the WebUI's
-// debug_stream.c destination, which is gated separately (by whether that
-// module's own httpd instance has been Start-ed, not by a script toggle).
-// Defaults to true (unchanged serial-console behavior).
+// Which destination(s) debug_print() actually writes to - see
+// ruby_debug_print_to()'s doc comment below. Defaults: UART on (unchanged
+// serial-console behavior), HTTP off (opt-in - and even when on here,
+// still only takes effect once the WebUI's debug_stream.c instance has
+// actually been Start-ed; this and that are two independent gates, both
+// have to allow it).
 static bool s_debug_print_uart_enabled = true;
+static bool s_debug_print_http_enabled = false;
 
 static void reset_dsl_state(void)
 {
@@ -236,6 +238,7 @@ static void reset_dsl_state(void)
     s_ble_sink_declared = false;
     s_ble_wifi_off_while_connected = false;
     s_debug_print_uart_enabled = true;
+    s_debug_print_http_enabled = false;
 }
 
 // ---- small mruby helpers ----------------------------------------------
@@ -334,11 +337,14 @@ static mrb_value dsl_usb_host_backends(mrb_state *mrb, mrb_value self)
 // nil/etc. show their contents, not just to_s) and sent to two
 // destinations:
 // - ESP_LOGI, the same `idf.py monitor` console already used for
-//   everything else - gated by `debug_print_uart` (default on).
+//   everything else.
 // - debug_stream_push() (main/debug_stream.c,
 //   mds/usb_hid/2026-09-10_mruby_debug_stream.md) - a non-blocking queue
 //   send, silently dropped if that module's httpd instance hasn't been
 //   Start-ed from the WebUI, so this is cheap to call unconditionally.
+//
+// Which of these actually receive it is controlled by `debug_print_to`
+// (default :uart only) - see ruby_debug_print_to()'s doc comment below.
 //
 // Neither destination does any actual network I/O from *this* call - the
 // original concern that ruled out network output entirely
@@ -364,7 +370,9 @@ static mrb_value dsl_debug_print(mrb_state *mrb, mrb_value self)
             if (s_debug_print_uart_enabled) {
                 ESP_LOGI(TAG, "script: %s", RSTRING_PTR(s));
             }
-            debug_stream_push(RSTRING_PTR(s));
+            if (s_debug_print_http_enabled) {
+                debug_stream_push(RSTRING_PTR(s));
+            }
         }
     }
     return mrb_nil_value();
@@ -703,19 +711,49 @@ static mrb_value ruby_ble_wifi_off_while_connected(mrb_state *mrb, mrb_value sel
     return mrb_nil_value();
 }
 
-// `debug_print_uart false` - stops debug_print()'s per-call ESP_LOGI
-// output to the serial console (idf.py monitor). Default true (unchanged
-// behavior). Independent of the WebUI's explicit Start/Stop-gated HTTP
-// debug stream (debug_stream.c, mds/usb_hid/2026-09-10_mruby_debug_stream.md) -
-// debug_print() always also pushes to that stream (a cheap non-blocking
-// queue send, silently dropped if the stream isn't currently started),
-// regardless of this toggle.
-static mrb_value ruby_debug_print_uart(mrb_state *mrb, mrb_value self)
+// `debug_print_to(*syms)` - explicitly sets which destination(s)
+// debug_print() writes to, replacing the previous set entirely (same
+// "fully controlled by the script's call" convention as
+// usb_host_backends(*syms) above - `debug_print_to()` with no arguments
+// means "neither", not "leave unchanged"). Supported symbols:
+//
+// - `:uart` - ESP_LOGI, the serial console (idf.py monitor)
+// - `:http` - debug_stream.c's queue (mds/usb_hid/2026-09-10_mruby_debug_stream.md) -
+//   still only actually reaches a browser once the WebUI's "Start debug
+//   stream" button has also started that module's httpd instance; this
+//   and that are independent gates, both have to allow it. Enabling
+//   :http here without ever clicking Start is harmless (debug_stream_push()
+//   is a no-op until then).
+//
+// Default (script never calls this): `:uart` only, i.e. equivalent to
+// `debug_print_to(:uart)` - unchanged serial-console-only behavior.
+static int debug_print_destination_from_symbol(mrb_state *mrb, mrb_value v)
+{
+    if (mrb_type(v) != MRB_TT_SYMBOL) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "debug_print_to: arguments must be symbols (:uart/:http)");
+    }
+    const char *name = mrb_sym_name(mrb, mrb_symbol(v));
+    if (strcmp(name, "uart") == 0) return 0;
+    if (strcmp(name, "http") == 0) return 1;
+    mrb_raisef(mrb, E_ARGUMENT_ERROR, "debug_print_to: unknown destination :%s (expected :uart/:http)", name);
+    return -1; // unreachable
+}
+
+static mrb_value ruby_debug_print_to(mrb_state *mrb, mrb_value self)
 {
     (void)self;
-    mrb_bool enabled;
-    mrb_get_args(mrb, "b", &enabled);
-    s_debug_print_uart_enabled = enabled;
+    const mrb_value *argv;
+    mrb_int argc;
+    mrb_get_args(mrb, "*", &argv, &argc);
+
+    bool uart = false, http = false;
+    for (mrb_int i = 0; i < argc; i++) {
+        int dest = debug_print_destination_from_symbol(mrb, argv[i]);
+        if (dest == 0) uart = true;
+        if (dest == 1) http = true;
+    }
+    s_debug_print_uart_enabled = uart;
+    s_debug_print_http_enabled = http;
     return mrb_nil_value();
 }
 
@@ -813,7 +851,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "usb_suspend_rp2040_sleep", ruby_usb_suspend_rp2040_sleep, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "wifi_fast_reconnect_static_ip", ruby_wifi_fast_reconnect_static_ip, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
-    mrb_define_method(mrb, k, "debug_print_uart", ruby_debug_print_uart, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
