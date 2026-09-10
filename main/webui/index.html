@@ -28,8 +28,7 @@
   <button id="save" disabled>Save &amp; reboot</button>
   <button id="sleep">Sleep now</button>
   <button id="bleUnpair">Unpair BLE</button>
-  <button id="debugStart">Start debug stream</button>
-  <button id="debugStop" disabled>Stop debug stream</button>
+  <button id="debugToggle" disabled>Start debug stream</button>
   <span id="msg"></span>
 </p>
 <pre id="debugLog"></pre>
@@ -41,7 +40,8 @@
   Saving writes the mrb_script partition and reboots the board to apply
   it - same effect as bin/upload_mruby_script.py, but over WiFi instead
   of serial. The board is unreachable for a few seconds while it
-  restarts; refresh this page once it's back.
+  restarts; this page polls it and reloads itself automatically once
+  it's back (give up and refresh manually if it takes longer than 30s).
   Syntax highlighting is loaded from a CDN (cdn.jsdelivr.net) - if this
   network has no internet access, editing still works as a plain textarea.
 </p>
@@ -63,13 +63,17 @@
   itself is connected and idle - it takes priority while still connecting).
 </p>
 <p class="hint">
-  "Start debug stream" opens a second, dedicated connection (port
+  "Start/Stop debug stream" opens a second, dedicated connection (port
   <code id="debugPortHint"></code>) that live-streams the script's
   <code>debug_print(...)</code> calls below. It costs the board a bit of
   RAM for as long as it's running, so it's opt-in rather than always on -
-  click "Stop debug stream" when done watching to free it back up (it
-  does NOT stop automatically when you navigate away or close this tab).
-  One viewer at a time is the expected use.
+  click "Stop debug stream" when done watching to free it back up. The
+  button reflects the board's actual state (fetched from /api/status), not
+  just what this tab remembers, so reloading or reopening this page while
+  it's still running picks the log back up automatically instead of
+  losing track of it - it only really turns off once you click "Stop"
+  (or the board reboots, which always clears it). One viewer at a time is
+  the expected use.
 </p>
 <p class="hint">
   "Update firmware" flashes a new esp32-kvm-ip <code>.bin</code> (an
@@ -91,8 +95,7 @@ const statusEl = document.getElementById('status');
 const saveBtn = document.getElementById('save');
 const sleepBtn = document.getElementById('sleep');
 const bleUnpairBtn = document.getElementById('bleUnpair');
-const debugStartBtn = document.getElementById('debugStart');
-const debugStopBtn = document.getElementById('debugStop');
+const debugToggleBtn = document.getElementById('debugToggle');
 const debugLogEl = document.getElementById('debugLog');
 const firmwareFileEl = document.getElementById('firmwareFile');
 const firmwareUploadBtn = document.getElementById('firmwareUpload');
@@ -102,6 +105,7 @@ const msgEl = document.getElementById('msg');
 const DEBUG_STREAM_PORT = 81;
 document.getElementById('debugPortHint').textContent = DEBUG_STREAM_PORT;
 let debugSource = null; // the active EventSource, or null while stopped
+let debugStreamActive = false; // last known board state (from /api/status), not just this tab's intent
 
 // CodeMirror comes from a CDN (see <script> tags above) - if it didn't
 // load (no internet on this network), fall back to the plain textarea
@@ -132,10 +136,39 @@ function setEditable(enabled) {
   if (cm) { cm.setOption('readOnly', !enabled); } else { scriptEl.disabled = !enabled; }
 }
 
+// Connects (or reconnects, e.g. after this page reloads while the board's
+// stream was already running) the SSE reader. Idempotent.
+function connectDebugSource() {
+  if (debugSource) { return; }
+  // Separate port = separate origin from this page's own - the board's
+  // debug_stream.c sends Access-Control-Allow-Origin itself so this read
+  // isn't blocked by CORS.
+  debugSource = new EventSource(`http://${location.hostname}:${DEBUG_STREAM_PORT}/stream`);
+  debugSource.onmessage = (ev) => appendDebugLine(ev.data);
+  debugSource.onerror = () => appendDebugLine('[stream error/disconnected]');
+}
+
+function setDebugButtonState(active) {
+  debugStreamActive = active;
+  debugToggleBtn.textContent = active ? 'Stop debug stream' : 'Start debug stream';
+  debugToggleBtn.disabled = false;
+}
+
 async function loadStatus() {
   try {
     const res = await fetch('/api/status');
-    statusEl.textContent = await res.text();
+    const text = await res.text();
+    statusEl.textContent = text;
+    // The board (not this tab) is the source of truth for whether the
+    // stream is running - this is what lets the toggle button and the
+    // log itself survive a page reload/reopen without losing track of
+    // an already-running stream.
+    const m = text.match(/debug_stream: (active|inactive)/);
+    if (m) {
+      const active = m[1] === 'active';
+      setDebugButtonState(active);
+      if (active) { connectDebugSource(); }
+    }
   } catch (e) {
     statusEl.textContent = 'status unavailable: ' + e;
   }
@@ -152,6 +185,25 @@ async function loadScript() {
   }
 }
 
+// Polls the board (which is rebooting) until it answers again, then
+// reloads this page - so "Save"/"Update firmware" feel like a single
+// action instead of "click, then remember to come back and hit refresh".
+const REBOOT_POLL_INTERVAL_MS = 1000;
+const REBOOT_POLL_MAX_ATTEMPTS = 30; // ~30s - generous over a plain reboot
+async function waitForBoardThenReload() {
+  msgEl.textContent = 'rebooting - waiting for the board to come back...';
+  for (let i = 0; i < REBOOT_POLL_MAX_ATTEMPTS; i++) {
+    await new Promise((r) => setTimeout(r, REBOOT_POLL_INTERVAL_MS));
+    try {
+      const res = await fetch('/api/status', { cache: 'no-store' });
+      if (res.ok) { location.reload(); return; }
+    } catch (e) {
+      // still down mid-reboot - keep polling
+    }
+  }
+  msgEl.textContent = "board didn't come back within 30s - refresh manually.";
+}
+
 saveBtn.onclick = async () => {
   saveBtn.disabled = true;
   msgEl.textContent = 'saving...';
@@ -159,13 +211,15 @@ saveBtn.onclick = async () => {
     const res = await fetch('/api/script', { method: 'POST', body: getScriptText() });
     const text = await res.text();
     if (res.ok) {
-      msgEl.textContent = text.trim() + ' Refresh this page in a few seconds.';
+      waitForBoardThenReload();
     } else {
       msgEl.textContent = 'error: ' + text;
       saveBtn.disabled = false;
     }
   } catch (e) {
-    msgEl.textContent = 'saved - board is rebooting (connection drop here is expected).';
+    // connection dropped mid-response - the board was likely already
+    // rebooting by the time it would have replied.
+    waitForBoardThenReload();
   }
 };
 
@@ -212,39 +266,29 @@ function appendDebugLine(line) {
   debugLogEl.scrollTop = debugLogEl.scrollHeight;
 }
 
-debugStartBtn.onclick = async () => {
-  debugStartBtn.disabled = true;
+debugToggleBtn.onclick = async () => {
+  const starting = !debugStreamActive;
+  debugToggleBtn.disabled = true;
   try {
-    const res = await fetch('/api/debug_stream/start', { method: 'POST' });
+    const res = await fetch(starting ? '/api/debug_stream/start' : '/api/debug_stream/stop', { method: 'POST' });
     const text = await res.text();
     if (!res.ok) {
       msgEl.textContent = 'error: ' + text;
-      debugStartBtn.disabled = false;
+      debugToggleBtn.disabled = false;
       return;
     }
-    // Separate port = separate origin from this page's own - the board's
-    // debug_stream.c sends Access-Control-Allow-Origin itself so this read
-    // isn't blocked by CORS.
-    debugSource = new EventSource(`http://${location.hostname}:${DEBUG_STREAM_PORT}/stream`);
-    debugSource.onmessage = (ev) => appendDebugLine(ev.data);
-    debugSource.onerror = () => appendDebugLine('[stream error/disconnected]');
-    debugStopBtn.disabled = false;
+    if (starting) {
+      connectDebugSource();
+    } else if (debugSource) {
+      debugSource.close();
+      debugSource = null;
+    }
+    setDebugButtonState(starting);
+    msgEl.textContent = text.trim();
   } catch (e) {
-    msgEl.textContent = 'failed to start debug stream: ' + e;
-    debugStartBtn.disabled = false;
+    msgEl.textContent = (starting ? 'start' : 'stop') + ' request failed: ' + e;
+    debugToggleBtn.disabled = false;
   }
-};
-
-debugStopBtn.onclick = async () => {
-  debugStopBtn.disabled = true;
-  if (debugSource) { debugSource.close(); debugSource = null; }
-  try {
-    const res = await fetch('/api/debug_stream/stop', { method: 'POST' });
-    msgEl.textContent = (await res.text()).trim();
-  } catch (e) {
-    msgEl.textContent = 'stop request failed: ' + e;
-  }
-  debugStartBtn.disabled = false;
 };
 
 firmwareFileEl.onchange = () => {
@@ -266,13 +310,15 @@ firmwareUploadBtn.onclick = async () => {
     const res = await fetch('/api/firmware', { method: 'POST', body: file });
     const text = await res.text();
     if (res.ok) {
-      msgEl.textContent = text.trim() + ' Refresh this page in a few seconds.';
+      waitForBoardThenReload();
     } else {
       msgEl.textContent = 'error: ' + text;
       firmwareUploadBtn.disabled = false;
     }
   } catch (e) {
-    msgEl.textContent = 'uploaded - board is rebooting (connection drop here is expected).';
+    // connection dropped mid-response - the board was likely already
+    // rebooting by the time it would have replied.
+    waitForBoardThenReload();
   }
 };
 
