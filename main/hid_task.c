@@ -87,21 +87,17 @@ void hid_task(void *pvParameters) {
                 }
 
                 case EVENT_TYPE_SYSTEM_CONTROL: {
-                    // event.system_control.usage_id is the raw HID Usage
-                    // ID (0x81/0x82/0x83) - map it to the report's 2-bit
-                    // Array field value here, same mapping as
-                    // usb_device_typec.c's/ble_hid_device.c's own copies
-                    // (Host role) - see usb_descriptors.h's
-                    // system_control_report_t and
+                    // event.system_control.usage_id IS the wire value
+                    // directly (usb_descriptors.c's report descriptor
+                    // uses Consumer Control's own Usage Minimum/Maximum
+                    // == Logical Minimum/Maximum trick) - no separate
+                    // mapping step, same as the Host role's
+                    // usb_device_typec_system_control_report()/
+                    // ble_hid_device_system_control_report(). See
                     // mds/usb_hid/2026-09-10_system_control_sleep.md.
-                    uint8_t value;
-                    switch (event.system_control.usage_id) {
-                        case 0x81: value = 1; break; // Power Down
-                        case 0x82: value = 2; break; // Sleep
-                        case 0x83: value = 3; break; // Wake Up
-                        default:   value = 0; break; // idle/release
-                    }
-                    system_control_report_t report = { .value = value };
+                    system_control_report_t report = {
+                        .value = (uint8_t)event.system_control.usage_id,
+                    };
                     wait_for_hid_ready(ITF_NUM_SYSCTL);
                     tud_hid_n_report(ITF_NUM_SYSCTL, 0, &report, sizeof(report));
                     break;

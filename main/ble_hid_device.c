@@ -137,30 +137,30 @@ static const uint8_t s_ble_hid_report_map[] = {
     0x81, 0x00,        //     Input (Data,Array,Abs)
     0xC0,              //   End Collection
 
-    // ── System Control (Report ID 4): Power Down/Sleep/Wake Up, 1 byte -
-    //    same 2-bit Array field encoding as TinyUSB's
-    //    TUD_HID_REPORT_DESC_SYSTEM_CONTROL() (usb_descriptors.c) - value
-    //    0 = idle/none, 1/2/3 = Power Down/Sleep/Wake Up respectively.
-    //    Unlike the other three reports above, nothing in this project
-    //    ever *reads* a physical device that produces this - only an
-    //    mruby script calling `system_control :sleep, ...` ever sends it
+    // ── System Control (Report ID 4): Power Down/Sleep/Wake Up/menu
+    //    navigation/restart, 1 byte - the reported value IS the raw HID
+    //    Usage ID directly (0x81-0x8F, see usb_descriptors.c's
+    //    SYSTEM_CONTROL_USAGE_MIN/MAX and its doc comment for why this
+    //    range and why Usage Minimum/Maximum == Logical Minimum/Maximum
+    //    rather than TinyUSB's stock 3-value Array template), 0 = idle/
+    //    none - mirrors usb_descriptors.c's hand-written descriptor
+    //    exactly (same Usage Page/range/field width). Unlike the other
+    //    three reports above, nothing in this project ever *reads* a
+    //    physical device that produces this - only an mruby script
+    //    calling `system_control :sleep, ...` ever sends it
     //    (mruby_filter.c) - see
     //    mds/usb_hid/2026-09-10_system_control_sleep.md.
     0x05, 0x01,        //   Usage Page (Generic Desktop)
     0x09, 0x80,        //   Usage (System Control)
     0xA1, 0x01,        //   Collection (Application)
     0x85, BLE_HID_REPORT_ID_SYSCTL,
-    0x15, 0x01,        //     Logical Minimum (1)
-    0x25, 0x03,        //     Logical Maximum (3)
-    0x09, 0x81,        //     Usage (System Power Down)
-    0x09, 0x82,        //     Usage (System Sleep)
-    0x09, 0x83,        //     Usage (System Wake Up)
-    0x75, 0x02,        //     Report Size (2)
+    0x16, 0x81, 0x00,  //     Logical Minimum (0x0081) - 2-byte form, 0x81 exceeds signed 8-bit range
+    0x26, 0x8F, 0x00,  //     Logical Maximum (0x008F)
+    0x19, 0x81,        //     Usage Minimum (0x81) - Usage Min/Max read as unsigned, 1 byte is enough
+    0x29, 0x8F,        //     Usage Maximum (0x8F)
+    0x75, 0x08,        //     Report Size (8)
     0x95, 0x01,        //     Report Count (1)
     0x81, 0x00,        //     Input (Data,Array,Abs)
-    0x75, 0x06,        //     Report Size (6) - padding
-    0x95, 0x01,        //     Report Count (1)
-    0x81, 0x01,        //     Input (Const,Array,Abs)
     0xC0,              //   End Collection
 };
 
@@ -524,26 +524,15 @@ void ble_hid_device_consumer_report(uint16_t usage_id)
     esp_hidd_dev_input_set(s_hid_dev, 0, BLE_HID_REPORT_ID_CONSUMER, buf, sizeof(buf));
 }
 
-// Maps the raw HID Usage ID (0x81/0x82/0x83) to the report map's 2-bit
-// Array field value (1/2/3, 0 = idle/release) - mirrors
-// usb_device_typec.c's own copy of this same mapping (see that file's
-// comment for why it's duplicated rather than shared).
-static uint8_t system_control_array_value(uint16_t usage_id)
-{
-    switch (usage_id) {
-        case 0x81: return 1; // Power Down
-        case 0x82: return 2; // Sleep
-        case 0x83: return 3; // Wake Up
-        default:   return 0; // idle/release (includes usage_id == 0)
-    }
-}
-
 void ble_hid_device_system_control_report(uint16_t usage_id)
 {
     if (!ble_hid_device_connected()) {
         return;
     }
-    uint8_t buf[1] = { system_control_array_value(usage_id) };
+    // usage_id IS the wire value directly (see this file's report map
+    // comment above and usb_device_typec_system_control_report()'s
+    // mirrored comment) - no separate mapping step.
+    uint8_t buf[1] = { (uint8_t)usage_id };
     esp_hidd_dev_input_set(s_hid_dev, 0, BLE_HID_REPORT_ID_SYSCTL, buf, sizeof(buf));
 }
 

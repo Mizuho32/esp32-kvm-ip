@@ -62,13 +62,16 @@ _Static_assert(sizeof(consumer_report_t) == 2, "Consumer report must be 2 bytes"
 // :keyboard pipeline branch() watching for a key combo a real keyboard
 // doesn't have a dedicated key for.
 typedef struct __attribute__((packed)) {
-    // TUD_HID_REPORT_DESC_SYSTEM_CONTROL()'s 2-bit Array field value, NOT
-    // the raw HID Usage ID - 0 = idle, 1 = Power Down, 2 = Sleep, 3 = Wake
-    // Up (usage_id_to_array_value() in usb_device_typec.c/ble_hid_device.c
-    // does that mapping right before building this struct; every other
-    // layer - protocol.h's udp_packet_t/hid_event_t, mruby_filter.c's
-    // system_control() - carries the actual 0x81/0x82/0x83 usage ID
-    // instead, same convention as consumer_report_t's usage_id above).
+    // The raw HID Usage ID directly (0x81-0x8F, see
+    // SYSTEM_CONTROL_USAGE_MIN/MAX in usb_descriptors.c) - 0 = idle/
+    // release, same convention as consumer_report_t's usage_id above.
+    // Unlike an earlier version of this report (TinyUSB's stock
+    // TUD_HID_REPORT_DESC_SYSTEM_CONTROL() template, a 2-bit Array field
+    // carrying a compressed 1/2/3 position index instead of the real
+    // usage ID), the hand-written descriptor in usb_descriptors.c uses
+    // Consumer Control's own Usage Minimum/Maximum == Logical Minimum/
+    // Maximum trick, so this value IS the wire value directly - no
+    // separate mapping step anywhere anymore.
     uint8_t value;
 } system_control_report_t; // 1 byte
 

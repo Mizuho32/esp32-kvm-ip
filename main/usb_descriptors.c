@@ -80,14 +80,50 @@ static const uint8_t s_hid_report_descriptor_consumer[] = {
     TUD_HID_REPORT_DESC_CONSUMER(),
 };
 
-// System Control (Power Down/Sleep/Wake Up) - Report Protocol only, same
-// as Consumer Control above. TinyUSB's own template
-// (class/hid/hid_device.h's TUD_HID_REPORT_DESC_SYSTEM_CONTROL()) already
-// matches exactly what's needed here (a 2-bit Array field selecting one
-// of the three usages, value 0 = none pressed) - see usb_descriptors.h's
-// system_control_report_t.
+// System Control (Power Down/Sleep/Wake Up/menu navigation/restart) -
+// Report Protocol only, same as Consumer Control above. Deliberately NOT
+// TinyUSB's own TUD_HID_REPORT_DESC_SYSTEM_CONTROL() template (which
+// hard-codes only 3 usages via a 2-bit Array field carrying a compressed
+// 1/2/3 position index, not the real Usage ID) - hand-written instead,
+// same Usage Minimum/Maximum style TUD_HID_REPORT_DESC_CONSUMER() already
+// uses above: Logical Minimum == Usage Minimum, so the reported byte
+// value equals the actual HID Usage ID directly (0 falls below Logical
+// Minimum = idle/none, same convention as Consumer's usage_id). This is
+// what lets mruby_filter.c's `system_control` DSL call accept a raw
+// Integer usage code, not just a handful of named symbols - see
+// SYSTEM_CONTROL_USAGE_MIN/MAX below and
+// mds/usb_hid/2026-09-10_system_control_sleep.md's follow-up.
+//
+// Range chosen: 0x81-0x8F, a contiguous run covering Power Down/Sleep/
+// Wake Up plus context/main/app menu navigation and cold/warm restart
+// (class/hid/hid.h's HID_USAGE_DESKTOP_SYSTEM_*) - the next usages after
+// that (0xA0+: Dock/Undock/Setup/Break/Debugger Break/Speaker Mute/
+// Hibernate, 0xB0+: Display Invert/Internal/External/...) sit in
+// separate, non-contiguous blocks and are mostly laptop-dock/debugging/
+// display-specific rather than generally useful for a KVM shortcut -
+// left out for now, extendable later (would need a second Usage Min/Max
+// block, or widening this one to include the gap).
+#define SYSTEM_CONTROL_USAGE_MIN HID_USAGE_DESKTOP_SYSTEM_POWER_DOWN  // 0x81
+#define SYSTEM_CONTROL_USAGE_MAX HID_USAGE_DESKTOP_SYSTEM_WARM_RESTART // 0x8F
+
 static const uint8_t s_hid_report_descriptor_system_control[] = {
-    TUD_HID_REPORT_DESC_SYSTEM_CONTROL(),
+    HID_USAGE_PAGE  ( HID_USAGE_PAGE_DESKTOP           ),
+    HID_USAGE       ( HID_USAGE_DESKTOP_SYSTEM_CONTROL ),
+    HID_COLLECTION  ( HID_COLLECTION_APPLICATION       ),
+      // Both Logical and Usage Minimum/Maximum encoded as explicit 2-byte
+      // items (the _N(..., 2) forms) even though the values fit in a
+      // plain byte - 0x81 exceeds the signed 8-bit range (+127), so a
+      // 1-byte HID_LOGICAL_MIN/MAX would be misread as a negative value
+      // by a strict parser (mirrors s_hid_report_descriptor_mouse's X/Y
+      // fields above, which hit the same issue at a larger scale).
+      HID_LOGICAL_MIN_N( SYSTEM_CONTROL_USAGE_MIN, 2 ),
+      HID_LOGICAL_MAX_N( SYSTEM_CONTROL_USAGE_MAX, 2 ),
+      HID_USAGE_MIN_N  ( SYSTEM_CONTROL_USAGE_MIN, 2 ),
+      HID_USAGE_MAX_N  ( SYSTEM_CONTROL_USAGE_MAX, 2 ),
+      HID_REPORT_COUNT ( 1 ),
+      HID_REPORT_SIZE  ( 8 ),
+      HID_INPUT        ( HID_DATA | HID_ARRAY | HID_ABSOLUTE ),
+    HID_COLLECTION_END,
 };
 
 // ═══════════════════════════════════════════════════════════════════

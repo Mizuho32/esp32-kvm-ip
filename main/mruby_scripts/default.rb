@@ -35,14 +35,21 @@
                      # Time#localtime takes no arguments, unlike MRI's - see
                      # mds/usb_hid/2026-09-10_ntp_sync.md's follow-up)
 
-# System Control (Power Down/Sleep/Wake Up) example - fires a momentary
-# action at whichever sinks you name, for a keyboard shortcut this
-# board's physical keyboard has no dedicated key for (e.g. the target PC
-# reacts to a hardware Sleep button). Not a source/sink/pipeline "kind"
-# like keyboard/mouse/consumer above - nothing ever reads this from real
-# hardware, a script only ever *sends* it, typically from a :keyboard
-# pipeline watching for some chosen combo. See
-# mds/usb_hid/2026-09-10_system_control_sleep.md.
+# System Control example - fires a momentary action at whichever sinks
+# you name, for a keyboard shortcut this board's physical keyboard has no
+# dedicated key for (e.g. the target PC reacts to a hardware Sleep
+# button). Not a source/sink/pipeline "kind" like keyboard/mouse/consumer
+# above - nothing ever reads this from real hardware, a script only ever
+# *sends* it, typically from a :keyboard pipeline watching for some
+# chosen combo. See mds/usb_hid/2026-09-10_system_control_sleep.md.
+#
+# First argument is either a known symbol - :power_down, :sleep,
+# :wake_up, :context_menu, :main_menu, :app_menu, :menu_help, :menu_exit,
+# :menu_select, :menu_right, :menu_left, :menu_up, :menu_down,
+# :cold_restart, :warm_restart - or a raw Integer HID Usage ID in
+# 0x81-0x8F for anything else in that range (class/hid/hid.h's
+# HID_USAGE_DESKTOP_SYSTEM_*), e.g. `system_control 0x84, :sysctl_typec`
+# is the same as `system_control :context_menu, :sysctl_typec`.
 #
 # 1) declare a sink per output you want it to reach:
 #    sink :sysctl_typec, :typec, kind: :system_control

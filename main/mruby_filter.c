@@ -411,26 +411,61 @@ static sink_def_t *find_sink(mrb_state *mrb, mrb_sym name)
     return NULL; // unreachable
 }
 
-// `:power_down`/`:sleep`/`:wake_up` -> the raw HID Usage ID on the
-// Generic Desktop page (0x01) - see class/hid/hid.h's
-// HID_USAGE_DESKTOP_SYSTEM_POWER_DOWN/SLEEP/WAKE_UP (0x81/0x82/0x83, not
-// pulled in by name here just for 3 constants). Threaded through exactly
-// like Consumer Control's usage_id (send_consumer_to_sink() etc. below) -
-// only usb_device_typec_system_control_report()/
-// ble_hid_device_system_control_report() convert this into the actual
-// wire report's 2-bit Array field value (1/2/3, 0 = idle) at the last
-// hop. See dsl_system_control()'s doc comment.
-static uint16_t system_control_usage_from_symbol(mrb_state *mrb, mrb_value v)
+// Matches usb_descriptors.c's SYSTEM_CONTROL_USAGE_MIN/MAX (kept as a
+// second literal copy rather than a shared header - this file doesn't
+// otherwise include usb_descriptors.h, and it's 2 constants) - the
+// hand-written HID report descriptor there (and ble_hid_device.c's own
+// mirrored report map) only declares this contiguous range as valid, so
+// anything outside it can't actually be represented on the wire (an
+// out-of-range Array value just reads as "no selection" to the host per
+// the HID spec - see mds/usb_hid/2026-09-10_system_control_sleep.md for
+// why this particular range was chosen).
+#define SYSTEM_CONTROL_USAGE_MIN 0x81 // Power Down
+#define SYSTEM_CONTROL_USAGE_MAX 0x8F // Warm Restart
+
+// First argument to `system_control` - either a known symbol (typo-safe,
+// covers the usages likely to actually matter for a KVM shortcut) or a
+// raw Integer HID Usage ID in [SYSTEM_CONTROL_USAGE_MIN,
+// SYSTEM_CONTROL_USAGE_MAX] for anything else in that range
+// (class/hid/hid.h's HID_USAGE_DESKTOP_SYSTEM_* enumerates them all).
+// Threaded through exactly like Consumer Control's usage_id
+// (send_consumer_to_sink() etc. below) - it IS the wire value directly
+// now (usb_device_typec_system_control_report()/
+// ble_hid_device_system_control_report() no longer remap it - see their
+// own comments) - see dsl_system_control()'s doc comment.
+static uint16_t system_control_usage_from_value(mrb_state *mrb, mrb_value v)
 {
+    if (mrb_type(v) == MRB_TT_FIXNUM) {
+        mrb_int n = mrb_fixnum(v);
+        if (n < SYSTEM_CONTROL_USAGE_MIN || n > SYSTEM_CONTROL_USAGE_MAX) {
+            mrb_raisef(mrb, E_ARGUMENT_ERROR,
+                       "system_control: usage 0x%02x out of supported range (0x%02x-0x%02x)",
+                       (int)n, SYSTEM_CONTROL_USAGE_MIN, SYSTEM_CONTROL_USAGE_MAX);
+        }
+        return (uint16_t)n;
+    }
     if (mrb_type(v) != MRB_TT_SYMBOL) {
-        mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: first argument must be a symbol (:power_down/:sleep/:wake_up)");
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: first argument must be a symbol or an Integer usage ID");
     }
     const char *name = mrb_sym_name(mrb, mrb_symbol(v));
     if (strcmp(name, "power_down") == 0) return 0x81;
     if (strcmp(name, "sleep") == 0) return 0x82;
     if (strcmp(name, "wake_up") == 0) return 0x83;
+    if (strcmp(name, "context_menu") == 0) return 0x84;
+    if (strcmp(name, "main_menu") == 0) return 0x85;
+    if (strcmp(name, "app_menu") == 0) return 0x86;
+    if (strcmp(name, "menu_help") == 0) return 0x87;
+    if (strcmp(name, "menu_exit") == 0) return 0x88;
+    if (strcmp(name, "menu_select") == 0) return 0x89;
+    if (strcmp(name, "menu_right") == 0) return 0x8A;
+    if (strcmp(name, "menu_left") == 0) return 0x8B;
+    if (strcmp(name, "menu_up") == 0) return 0x8C;
+    if (strcmp(name, "menu_down") == 0) return 0x8D;
+    if (strcmp(name, "cold_restart") == 0) return 0x8E;
+    if (strcmp(name, "warm_restart") == 0) return 0x8F;
     mrb_raisef(mrb, E_ARGUMENT_ERROR,
-               "system_control: unknown usage :%s (expected :power_down/:sleep/:wake_up)", name);
+               "system_control: unknown usage :%s (expected a known symbol, or an Integer 0x%02x-0x%02x)",
+               name, SYSTEM_CONTROL_USAGE_MIN, SYSTEM_CONTROL_USAGE_MAX);
     return 0; // unreachable
 }
 
@@ -668,9 +703,11 @@ static mrb_value dsl_pipeline(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
-// `system_control(:sleep, :sink1, :sink2, ...)` - fires a momentary
-// System Control action (Power Down/Sleep/Wake Up) at named sinks right
-// now. Deliberately NOT part of the source/sink/pipeline/from/to/branch
+// `system_control(:sleep, :sink1, :sink2, ...)` (or `system_control(0x82,
+// :sink1, ...)` with a raw Integer usage ID - see
+// system_control_usage_from_value()) - fires a momentary System Control
+// action at named sinks right now. Deliberately NOT part of the
+// source/sink/pipeline/from/to/branch
 // model above: that whole model exists to filter/route events that
 // arrive from somewhere (a real USB device, or the network) - but no
 // physical keyboard/mouse this project reads ever produces a System
@@ -697,9 +734,9 @@ static mrb_value dsl_system_control(mrb_state *mrb, mrb_value self)
     mrb_int argc;
     mrb_get_args(mrb, "*", &argv, &argc);
     if (argc < 1) {
-        mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: usage symbol required (:power_down/:sleep/:wake_up)");
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: usage symbol or Integer required");
     }
-    uint16_t usage_id = system_control_usage_from_symbol(mrb, argv[0]);
+    uint16_t usage_id = system_control_usage_from_value(mrb, argv[0]);
 
     if (argc - 1 > MRB_DSL_MAX_SINKS) {
         mrb_raise(mrb, E_ARGUMENT_ERROR, "system_control: too many sink names");

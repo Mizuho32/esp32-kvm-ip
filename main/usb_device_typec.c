@@ -249,32 +249,21 @@ void usb_device_typec_consumer_report(uint16_t usage_id)
 #endif
 }
 
-// Maps the raw HID Usage ID (0x81/0x82/0x83, matching hid.h's
-// HID_USAGE_DESKTOP_SYSTEM_POWER_DOWN/SLEEP/WAKE_UP - not spelled out via
-// that header here to avoid pulling it in just for 3 constants) to
-// TUD_HID_REPORT_DESC_SYSTEM_CONTROL()'s 2-bit Array field value (the
-// position of that usage among the three listed there, 1-indexed; 0 =
-// none/idle, same convention as everywhere else "0 = release" is used in
-// this project). Mirrored in ble_hid_device.c's own copy - tiny and
-// stable enough that duplicating it beats a shared header for 2 call
-// sites.
-static uint8_t system_control_array_value(uint16_t usage_id)
-{
-    switch (usage_id) {
-        case 0x81: return 1; // Power Down
-        case 0x82: return 2; // Sleep
-        case 0x83: return 3; // Wake Up
-        default:   return 0; // idle/release (includes usage_id == 0)
-    }
-}
-
 void usb_device_typec_system_control_report(uint16_t usage_id)
 {
     if (!wait_for_ready(ITF_NUM_SYSCTL)) {
         return;
     }
+    // usage_id IS the wire value directly now (usb_descriptors.c's
+    // report descriptor uses Consumer Control's own Usage Minimum/
+    // Maximum == Logical Minimum/Maximum trick) - no separate mapping
+    // step. A usage_id outside SYSTEM_CONTROL_USAGE_MIN/MAX (including 0)
+    // just reads as "no selection" to the host per the HID spec's Array
+    // item semantics - harmless, not validated here (mruby_filter.c's DSL
+    // layer is where a typo'd/out-of-range usage gets a real error
+    // instead of silently doing nothing).
     system_control_report_t report = {
-        .value = system_control_array_value(usage_id),
+        .value = (uint8_t)usage_id,
     };
     bool sent = tud_hid_n_report(ITF_NUM_SYSCTL, 0, &report, sizeof(report));
 #if USB_DEVICE_TYPEC_RATE_MONITOR
