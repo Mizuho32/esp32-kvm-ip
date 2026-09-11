@@ -226,6 +226,13 @@ static bool s_ntp_server_set;
 // mruby_filter_ble_wifi_off_while_connected()'s doc comment in
 // mruby_filter.h for the tradeoff this makes.
 static bool s_ble_wifi_off_while_connected = false;
+// Read by main_host.c, same reasoning as s_ble_sink_declared above.
+// Default false: preserves the original always-on behavior (a script
+// that only ever declares `sink :xxx, :ble, ...` and never calls
+// `ble_dynamic`/`ble_enable` still gets BLE auto-started at boot exactly
+// as before this existed) - see mruby_filter_ble_dynamic()'s doc comment
+// in mruby_filter.h and mds/usb_hid/2026-09-11_ble_dynamic_enable.md.
+static bool s_ble_dynamic = false;
 // Which destination(s) debug_print() actually writes to - see
 // ruby_debug_print_to()'s doc comment below. Defaults: UART on (unchanged
 // serial-console behavior), HTTP off (opt-in - and even when on here,
@@ -257,6 +264,7 @@ static void reset_dsl_state(void)
     s_wifi_fast_reconnect_static_ip_enabled = false;
     s_ble_sink_declared = false;
     s_ble_wifi_off_while_connected = false;
+    s_ble_dynamic = false;
     s_debug_print_uart_enabled = true;
     s_debug_print_http_enabled = false;
     s_ntp_server_set = false;
@@ -928,6 +936,51 @@ static mrb_value ruby_ble_wifi_off_while_connected(mrb_state *mrb, mrb_value sel
     return mrb_nil_value();
 }
 
+// `ble_dynamic true` - top-level-only opt-in (call it directly in the
+// script body, not from inside a branch()/to() block - it only matters
+// before main_host.c's boot-time auto-start check runs, see
+// mruby_filter_ble_dynamic()'s doc comment in mruby_filter.h). Default
+// false: preserves the original "auto-start BLE at boot if any `:ble`
+// sink is declared" behavior. See mds/usb_hid/2026-09-11_ble_dynamic_enable.md.
+static mrb_value ruby_ble_dynamic(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_bool enabled;
+    mrb_get_args(mrb, "b", &enabled);
+    s_ble_dynamic = enabled;
+    return mrb_nil_value();
+}
+
+// `ble_enable(true)`/`ble_enable(false)` - starts/stops the BLE HID
+// stack right now (ble_hid_device_start()/_stop()), unlike
+// ble_dynamic/sink() above which only ever take effect at boot. Meant to
+// be called from anywhere at runtime, typically a :keyboard pipeline's
+// to()/branch() block reacting to some chosen key combo - see
+// mds/usb_hid/2026-09-11_ble_dynamic_enable.md's motivating use case
+// (BLE off by default to avoid its permanent RAM/WiFi-coexistence cost,
+// turned on only while actually wanted). Both directions are idempotent
+// (already-started/-stopped is a harmless no-op) and BLOCK the calling
+// task for roughly as long as the underlying stack takes to actually
+// start/stop - not instantaneous like every other DSL call in this file.
+// Since this typically runs from inside mruby's dispatch path
+// (s_mrb_mutex held - see mruby_dispatch_keyboard()), that means every
+// *other* pipeline (mouse included) stalls for the same duration - an
+// accepted, documented tradeoff for a deliberate, infrequent action, not
+// a hot-path concern (mirrors system_control()'s own
+// SYSTEM_CONTROL_PULSE_MS delay, just longer and less fixed).
+static mrb_value ruby_ble_enable(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_bool enabled;
+    mrb_get_args(mrb, "b", &enabled);
+    esp_err_t err = enabled ? ble_hid_device_start() : ble_hid_device_stop();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ble_enable %s: %s failed: %s", enabled ? "true" : "false",
+                 enabled ? "ble_hid_device_start()" : "ble_hid_device_stop()", esp_err_to_name(err));
+    }
+    return mrb_nil_value();
+}
+
 // `debug_print_to(*syms)` - explicitly sets which destination(s)
 // debug_print() writes to, replacing the previous set entirely (same
 // "fully controlled by the script's call" convention as
@@ -1070,6 +1123,8 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "ntp_sync", ruby_ntp_sync, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "timezone", ruby_timezone, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "ble_dynamic", ruby_ble_dynamic, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "ble_enable", ruby_ble_enable, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
@@ -1220,6 +1275,11 @@ bool mruby_filter_ble_sink_declared(void)
 bool mruby_filter_ble_wifi_off_while_connected(void)
 {
     return s_ble_wifi_off_while_connected;
+}
+
+bool mruby_filter_ble_dynamic(void)
+{
+    return s_ble_dynamic;
 }
 
 // Resolves every :udp sink's host/port (getaddrinfo()) - deferred out of

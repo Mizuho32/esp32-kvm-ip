@@ -18,6 +18,9 @@
 #include "esp_hid_gap.h"
 #include "esp_log.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
 #include "host/ble_gap.h"
 #include "host/ble_hs.h"
 #include "host/ble_store.h"
@@ -205,7 +208,14 @@ static void ble_hid_mouse_pending_reset(void);
 // doesn't feel "stuck" if a normal reconnect was wanted instead.
 #define BLE_REDISCONNECT_HOLDOFF_US (30 * 1000 * 1000)
 
+// Both created once, on the first ever ble_hid_device_start(), and kept
+// forever (never esp_timer_delete()'d / vSemaphoreDelete()'d) - mirrors
+// debug_stream.c's immortal-queue design (mds/usb_hid/2026-09-10_mruby_debug_stream.md):
+// small, fixed-cost primitives that are simplest left alone, with only
+// the actual heavy BLE/NimBLE stack itself toggled by
+// ble_hid_device_start()/_stop() (mds/usb_hid/2026-09-11_ble_dynamic_enable.md).
 static esp_timer_handle_t s_readvertise_timer;
+static SemaphoreHandle_t s_nimble_host_stopped_sem;
 
 static void readvertise_timer_cb(void *arg)
 {
@@ -351,7 +361,21 @@ void ble_hid_task_start_up(void)
 static void nimble_host_task(void *param)
 {
     (void)param;
-    nimble_port_run(); // returns only once nimble_port_stop() is called - never, for us
+    // Returns once nimble_port_stop() is called - ble_hid_device_stop()
+    // below is now the one call site that does that (previously never,
+    // when this stack was only ever started once at boot and left
+    // running for the process's whole lifetime). Giving
+    // s_nimble_host_stopped_sem here, right after nimble_port_run()
+    // actually returns but *before* nimble_port_freertos_deinit() - that
+    // call self-deletes this very task (vTaskDelete(NULL) internally), so
+    // nothing after it in this function ever runs; it's what lets
+    // ble_hid_device_stop()'s caller block until the host task has
+    // genuinely exited before touching the BT controller itself. See
+    // mds/usb_hid/2026-09-11_ble_dynamic_enable.md.
+    nimble_port_run();
+    if (s_nimble_host_stopped_sem != NULL) {
+        xSemaphoreGive(s_nimble_host_stopped_sem);
+    }
     nimble_port_freertos_deinit();
 }
 
@@ -361,17 +385,28 @@ esp_err_t ble_hid_device_start(void)
         return ESP_OK;
     }
 
-    const esp_timer_create_args_t readvertise_timer_args = {
-        .callback = readvertise_timer_cb,
-        .name = "ble_readv",
-    };
-    esp_err_t timer_ret = esp_timer_create(&readvertise_timer_args, &s_readvertise_timer);
-    if (timer_ret != ESP_OK) {
-        // Not fatal - just means a deliberate disconnect (see
-        // hidd_event_callback()) falls back to immediate re-advertising
-        // instead of holding off, same as before this feature existed.
-        ESP_LOGW(TAG, "esp_timer_create (re-advertise holdoff) failed: %s", esp_err_to_name(timer_ret));
-        s_readvertise_timer = NULL;
+    // Created once (first ever start) and kept forever - see their
+    // declarations above for why.
+    if (s_readvertise_timer == NULL) {
+        const esp_timer_create_args_t readvertise_timer_args = {
+            .callback = readvertise_timer_cb,
+            .name = "ble_readv",
+        };
+        esp_err_t timer_ret = esp_timer_create(&readvertise_timer_args, &s_readvertise_timer);
+        if (timer_ret != ESP_OK) {
+            // Not fatal - just means a deliberate disconnect (see
+            // hidd_event_callback()) falls back to immediate re-advertising
+            // instead of holding off, same as before this feature existed.
+            ESP_LOGW(TAG, "esp_timer_create (re-advertise holdoff) failed: %s", esp_err_to_name(timer_ret));
+            s_readvertise_timer = NULL;
+        }
+    }
+    if (s_nimble_host_stopped_sem == NULL) {
+        s_nimble_host_stopped_sem = xSemaphoreCreateBinary();
+        if (s_nimble_host_stopped_sem == NULL) {
+            ESP_LOGE(TAG, "xSemaphoreCreateBinary (nimble host stop signal) failed");
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     esp_err_t ret = esp_hid_gap_init(HIDD_BLE_MODE);
@@ -415,6 +450,75 @@ esp_err_t ble_hid_device_start(void)
     s_started = true;
     ESP_LOGI(TAG, "BLE HID device starting as '%s'", s_hid_config.device_name);
     return ESP_OK;
+}
+
+// Symmetric teardown of everything ble_hid_device_start() brought up,
+// short of s_readvertise_timer/s_nimble_host_stopped_sem themselves (see
+// their declaration comment - those two stay allocated forever so a
+// later ble_hid_device_start() never has to recreate them). Called by
+// mruby_filter.c's `ble_enable false` (see
+// mds/usb_hid/2026-09-11_ble_dynamic_enable.md) - blocks its caller for
+// roughly as long as the BT controller/NimBLE host take to actually shut
+// down (not instantaneous, unlike most of this file's other calls - see
+// that doc's note on what this means for whichever dispatch task calls
+// it holding mruby_filter.c's s_mrb_mutex meanwhile).
+esp_err_t ble_hid_device_stop(void)
+{
+    if (!s_started) {
+        return ESP_OK; // already stopped - idempotent, same as debug_stream_stop()
+    }
+
+    // Cancel a pending deliberate-disconnect re-advertise holdoff (if
+    // any) rather than deleting the timer - it stays alive for next time
+    // (see its declaration comment). Left pending, it would fire
+    // readvertise_timer_cb() *after* the teardown below, calling
+    // esp_hid_ble_gap_adv_start() against an already-deinitialized BT
+    // controller - undefined behavior, not just a harmless no-op.
+    if (s_readvertise_timer != NULL) {
+        esp_timer_stop(s_readvertise_timer); // no-op (ESP_ERR_INVALID_STATE, ignored) if not pending
+    }
+
+    // Not currently advertising is a normal case (already connected, or
+    // never started advertising this cycle) - ble_gap_adv_stop()'s
+    // BLE_HS_EALREADY-ish "wasn't advertising" return is expected and
+    // harmless, not logged as an error.
+    ble_gap_adv_stop();
+
+    // esp_hidd_dev_deinit() -> esp_hid's nimble_hidd.c's
+    // nimble_hid_stop_gatts() (read from ESP-IDF's own source, not
+    // assumed) already disconnects the current connection if any, then
+    // stops the GATT server and deinits the HID/DIS/BAS/SPS/GATT/GAP
+    // service layers - the actual symmetric counterpart to
+    // esp_hidd_dev_init() above.
+    if (s_hid_dev != NULL) {
+        esp_hidd_dev_deinit(s_hid_dev);
+        s_hid_dev = NULL;
+    }
+
+    // nimble_port_stop() only *requests* the NimBLE host event loop to
+    // exit - it does not block until it actually has. Waiting on
+    // s_nimble_host_stopped_sem (given by nimble_host_task() right after
+    // nimble_port_run() returns) is what makes this call synchronous -
+    // esp_hid_gap_deinit() below disables/deinits the BT controller
+    // itself, which must not happen while the NimBLE host task might
+    // still be mid-shutdown.
+    nimble_port_stop();
+    xSemaphoreTake(s_nimble_host_stopped_sem, portMAX_DELAY);
+
+    esp_err_t ret = esp_hid_gap_deinit(); // esp_nimble_deinit() + BT controller disable+deinit
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "esp_hid_gap_deinit failed: %s (continuing anyway)", esp_err_to_name(ret));
+    }
+
+    // Restore the default WiFi-favoring coex arbitration now that BLE
+    // isn't in use - mirrors ble_hid_device_start()'s own comment on why
+    // it biases toward BT in the first place.
+    esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+
+    s_started = false;
+    s_connected = false;
+    ESP_LOGI(TAG, "BLE HID device stopped");
+    return ret;
 }
 
 bool ble_hid_device_connected(void)

@@ -151,6 +151,27 @@ bool mruby_filter_ble_sink_declared(void);
 // own USB link suspending, not to a sink actually being in active use).
 bool mruby_filter_ble_wifi_off_while_connected(void);
 
+// The script may call `ble_dynamic true` to opt out of
+// mruby_filter_ble_sink_declared()'s auto-start-at-boot behavior above -
+// main_host.c then never calls ble_hid_device_start() on its own, no
+// matter how many `:ble` sinks are declared. The script is then
+// responsible for calling `ble_enable(true)`/`ble_enable(false)`
+// (ruby_ble_enable() -> ble_hid_device_start()/_stop()) itself, typically
+// from a :keyboard pipeline's to()/branch() block reacting to some chosen
+// key combo - lets BLE (and its permanent RAM cost + WiFi-coexistence
+// radio contention, see mruby_filter_ble_wifi_off_while_connected()'s doc
+// comment above) stay off until actually wanted, rather than running for
+// the board's whole uptime just because a script happens to use BLE at
+// all. Only meaningful if called from the script's top level - checked
+// once, right after mruby_filter_init() returns and before any dispatch
+// happens, same timing as mruby_filter_ble_sink_declared() itself; a
+// runtime call (e.g. from inside a branch() block) is too late to affect
+// this check. Defaults to *false* (preserves the original always-on
+// behavior for any existing script that only ever calls
+// `sink :name, :ble, ...` and never touches ble_dynamic/ble_enable at
+// all). See mds/usb_hid/2026-09-11_ble_dynamic_enable.md.
+bool mruby_filter_ble_dynamic(void);
+
 // The script may call `usb_suspend_rp2040_sleep true` to opt this board
 // into power_manager.c also telling the RP2040 bridge backend
 // (usb_host_rp2040_bridge.c, KVM_ROLE=HOST + rp2040_bridge active only) to

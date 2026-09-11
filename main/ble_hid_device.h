@@ -54,6 +54,23 @@
 esp_err_t ble_hid_device_start(void);
 
 /**
+ * Tears down everything ble_hid_device_start() brought up (disconnects
+ * if connected, stops advertising, deinits the HID/GATT service layer,
+ * stops the NimBLE host task, disables+deinits the BT controller) - a
+ * later ble_hid_device_start() call brings it all back. A no-op
+ * returning ESP_OK if not currently started. Exposed for
+ * mruby_filter.c's `ble_enable false` DSL call
+ * (mds/usb_hid/2026-09-11_ble_dynamic_enable.md) - lets a script turn
+ * BLE off again at runtime (e.g. via a keyboard shortcut), not just on.
+ * Blocks its caller for roughly as long as the underlying stack actually
+ * takes to shut down (not instantaneous) - see that doc for what this
+ * means when called from mruby's dispatch path.
+ *
+ * @return ESP_OK on success (or if already stopped).
+ */
+esp_err_t ble_hid_device_stop(void);
+
+/**
  * @return true if a central (the target PC) is currently connected over
  *         BLE right now. false before ble_hid_device_start(), while
  *         advertising/unpaired, or if ble_hid_device_start() was never

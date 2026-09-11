@@ -170,8 +170,12 @@ void app_main(void)
     // BLE HID output (mds/usb_hid/2026-09-07_ble_hid_sink_plan.md) - only
     // pulled in if the script actually declared a `:ble` sink (see
     // mruby_filter_ble_sink_declared()'s doc comment). Independent of
-    // WiFi/type-c - can run alongside either or both.
-    if (mruby_filter_ble_sink_declared()) {
+    // WiFi/type-c - can run alongside either or both. Skipped entirely if
+    // the script opted into `ble_dynamic true` - see
+    // mruby_filter_ble_dynamic()'s doc comment
+    // (mds/usb_hid/2026-09-11_ble_dynamic_enable.md): the script is then
+    // responsible for calling `ble_enable true` itself, whenever it wants.
+    if (mruby_filter_ble_sink_declared() && !mruby_filter_ble_dynamic()) {
         if (ble_hid_device_start() != ESP_OK) {
             ESP_LOGW(TAG, "Failed to start BLE HID device (not fatal - continuing without it)");
         }
