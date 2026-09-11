@@ -29,6 +29,7 @@ if(KVM_ROLE STREQUAL "HOST")
             "mruby_filter.c"
             "mruby_webui.c"
             "esp_hid_gap.c"
+            "nimble_hidd_fork.c"
             "ble_hid_device.c"
             "mruby_ctype_shim.c"
             "mruby_alloc_psram.c"

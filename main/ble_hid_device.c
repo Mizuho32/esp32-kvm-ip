@@ -17,6 +17,7 @@
 #include "esp_hidd.h"
 #include "esp_hid_gap.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -29,6 +30,7 @@
 #include "nimble/nimble_port_freertos.h"
 
 #include "mruby_filter.h"
+#include "nimble_hidd_fork.h"
 #include "status_led.h"
 #include "wifi_manager.h"
 
@@ -187,6 +189,26 @@ static esp_hidd_dev_t *s_hid_dev;
 static bool s_connected;
 static bool s_started;
 
+// Set right before ble_hid_device_stop() forces the stack down, cleared
+// again the next time ble_hid_device_start() brings it back up - tells
+// hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case to do nothing.
+// Needed because ble_hid_device_stop() deliberately no longer calls
+// esp_hidd_dev_deinit() (see its own doc comment) - which means the GAP
+// event listener esp_hidd's nimble_hidd.c registered is never explicitly
+// unregistered (that call lived inside the very deinit path we now skip,
+// and nimble_gap_event_listener is nimble_hidd.c's own static - nothing
+// outside that file can unregister it). ble_hs_deinit()'s forced
+// disconnect (of whatever's still connected) still reaches that
+// listener and still gets posted up to this callback as an ordinary
+// ESP_HIDD_DISCONNECT_EVENT - asynchronously, via esp_event's own task,
+// so it can (and on real hardware did) arrive *after*
+// ble_hid_device_stop() has already returned and torn the whole NimBLE
+// host/controller down. Without this flag the handler would try to
+// resume WiFi and re-advertise into a stack that no longer exists -
+// real-hardware crash, LoadProhibited inside ble_hs_is_enabled(), see
+// mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md's follow-up.
+static bool s_ignore_disconnect_events;
+
 // Forward-declared: defined alongside ble_hid_device_mouse_report() below,
 // but hidd_event_callback() (right below) needs to call it on connect/
 // disconnect.
@@ -211,6 +233,39 @@ static void ble_hid_mouse_pending_reset(void);
 // actual heavy BLE/NimBLE stack itself toggled by
 // ble_hid_device_start()/_stop() (mds/usb_hid/2026-09-11_ble_dynamic_enable.md).
 static SemaphoreHandle_t s_nimble_host_stopped_sem;
+
+// esp_hid_gap.c's peer-address rejection (should_reject_reconnect()) stops
+// the *same* peer from silently reconnecting, but real-hardware testing
+// found it still isn't enough on its own: that peer's OS typically fires
+// off a rapid burst of reconnect attempts right after the deliberate
+// disconnect, and each one still completes a full link-layer connection
+// before esp_hid_gap.c's GAP handler notices and terminates it - visible
+// on the peer side as a stressful few seconds of connect/drop flicker
+// (and on ours, log spam). Ordinary BLE peripherals (earbuds, mice) avoid
+// this by briefly going dark instead: stop advertising for a short window
+// right after a deliberate disconnect, so that whole opening burst finds
+// nothing to connect to and gives up (most OS BT stacks don't keep
+// hammering forever - they retry hard for a moment, then back off), then
+// go back to normal advertising. This is that same idea, just much
+// shorter than the old blanket 30s holdoff it replaced: short enough that
+// pairing a genuinely *different* device is barely delayed, long enough
+// to outlast the peer's initial reconnect burst. esp_hid_gap.c's
+// peer-specific rejection stays in place underneath as a backstop for
+// stragglers that show up after this window closes.
+//
+// Created once, on the first ever ble_hid_device_start(), and kept
+// forever (never esp_timer_delete()'d) - same immortal-primitive pattern
+// as s_nimble_host_stopped_sem right above.
+#define BLE_DELIBERATE_DISCONNECT_ADV_BLACKOUT_US (3 * 1000 * 1000)
+static esp_timer_handle_t s_readvertise_timer;
+
+static void readvertise_timer_cb(void *arg)
+{
+    (void)arg;
+    ESP_LOGI(TAG, "resuming advertising (deliberate-disconnect blackout elapsed)");
+    esp_hid_ble_gap_adv_start();
+    status_led_set_ble_advertising(true);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 //  HID device event callback
@@ -264,6 +319,16 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
         ESP_LOGI(TAG, "disconnected (reason %d)", param->disconnect.reason);
         s_connected = false;
         ble_hid_mouse_pending_reset(); // don't deliver a stale backlog as one big jump on reconnect
+
+        if (s_ignore_disconnect_events) {
+            // ble_hid_device_stop() is tearing (or has already torn) the
+            // whole stack down - see s_ignore_disconnect_events' doc
+            // comment above for why this event still arrives anyway, and
+            // why touching WiFi/advertising here would be unsafe.
+            ESP_LOGI(TAG, "disconnect is part of an intentional ble_toggle(false) shutdown - not resuming");
+            break;
+        }
+
         if (mruby_filter_ble_wifi_off_while_connected()) {
             esp_err_t err = wifi_manager_resume();
             if (err != ESP_OK) {
@@ -285,17 +350,27 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
             }
         }
 
-        // Always resume advertising immediately now - esp_hid_gap.c's raw
-        // NimBLE GAP listener (nimble_hid_gap_event()) is what remembers
-        // a *deliberate* disconnect's peer address and bounces only that
-        // peer's next reconnect attempt for a while, so a *different*
-        // device can still pair right away instead of waiting through a
-        // blanket holdoff that used to apply to everyone regardless of
-        // which peer was trying to connect. See
-        // mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md's follow-up.
-        ESP_LOGI(TAG, "resuming advertising");
-        esp_hid_ble_gap_adv_start();
-        status_led_set_ble_advertising(true);
+        // Deliberate disconnect (see s_readvertise_timer's doc comment
+        // above): go dark for a short blackout instead of resuming
+        // advertising right away, so the peer's own rapid reconnect burst
+        // finds nothing and gives up. Any other disconnect reason (out of
+        // range, etc.) resumes immediately as before - only an
+        // intentional disconnect needs this.
+        if (param->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM)) {
+            ESP_LOGI(TAG, "deliberate disconnect - going dark for %d ms before re-advertising",
+                     BLE_DELIBERATE_DISCONNECT_ADV_BLACKOUT_US / 1000);
+            esp_err_t err = esp_timer_start_once(s_readvertise_timer, BLE_DELIBERATE_DISCONNECT_ADV_BLACKOUT_US);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "esp_timer_start_once (readvertise blackout) failed: %s - "
+                         "resuming advertising immediately instead", esp_err_to_name(err));
+                esp_hid_ble_gap_adv_start();
+                status_led_set_ble_advertising(true);
+            }
+        } else {
+            ESP_LOGI(TAG, "resuming advertising");
+            esp_hid_ble_gap_adv_start();
+            status_led_set_ble_advertising(true);
+        }
         break;
     case ESP_HIDD_STOP_EVENT:
         ESP_LOGI(TAG, "stopped");
@@ -351,6 +426,12 @@ esp_err_t ble_hid_device_start(void)
         return ESP_OK;
     }
 
+    // A fresh stack is coming up - any stray disconnect event left over
+    // from a previous ble_hid_device_stop() is done mattering, and this
+    // start's own events need to be handled normally again. See
+    // s_ignore_disconnect_events' doc comment.
+    s_ignore_disconnect_events = false;
+
     // Created once (first ever start) and kept forever - see its
     // declaration above for why.
     if (s_nimble_host_stopped_sem == NULL) {
@@ -358,6 +439,17 @@ esp_err_t ble_hid_device_start(void)
         if (s_nimble_host_stopped_sem == NULL) {
             ESP_LOGE(TAG, "xSemaphoreCreateBinary (nimble host stop signal) failed");
             return ESP_ERR_NO_MEM;
+        }
+    }
+    if (s_readvertise_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = readvertise_timer_cb,
+            .name = "ble_readvertise",
+        };
+        esp_err_t err = esp_timer_create(&timer_args, &s_readvertise_timer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_timer_create (readvertise blackout) failed: %s", esp_err_to_name(err));
+            return err;
         }
     }
 
@@ -390,9 +482,15 @@ esp_err_t ble_hid_device_start(void)
         return ret;
     }
 
-    ret = esp_hidd_dev_init(&s_hid_config, ESP_HID_TRANSPORT_BLE, hidd_event_callback, &s_hid_dev);
+    // kvm_ble_hidd_dev_init() (nimble_hidd_fork.c/.h), not the generic
+    // esp_hidd_dev_init(..., ESP_HID_TRANSPORT_BLE, ...) - see that fork's
+    // file header comment for why. Same call shape/return semantics
+    // otherwise, and everything downstream (esp_hidd_dev_input_set() in
+    // the report-sending functions below, esp_hidd_dev_deinit() in
+    // ble_hid_device_stop()) works completely unchanged.
+    ret = kvm_ble_hidd_dev_init(&s_hid_config, hidd_event_callback, &s_hid_dev);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "esp_hidd_dev_init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "kvm_ble_hidd_dev_init failed: %s", esp_err_to_name(ret));
         return ret;
     }
 
@@ -419,21 +517,75 @@ esp_err_t ble_hid_device_stop(void)
         return ESP_OK; // already stopped - idempotent, same as debug_stream_stop()
     }
 
+    // Snapshot before anything below changes it - needed for the WiFi
+    // resume just below, since (see that block's comment) the normal
+    // ESP_HIDD_DISCONNECT_EVENT path that would otherwise have done this
+    // never fires for a stop() while still connected.
+    bool was_connected = s_connected;
+
+    // From here on, any ESP_HIDD_DISCONNECT_EVENT - including one
+    // triggered as a side effect of the forced disconnect inside
+    // ble_hs_deinit() further down, possibly delivered well after this
+    // function returns (see s_ignore_disconnect_events' doc comment) -
+    // must not touch WiFi or advertising.
+    s_ignore_disconnect_events = true;
+
+    // Cancel any pending post-deliberate-disconnect blackout - if it fired
+    // after the teardown below, readvertise_timer_cb() would be calling
+    // into a NimBLE stack that no longer exists. esp_timer_stop() on an
+    // already-idle timer just returns ESP_ERR_INVALID_STATE, harmless.
+    esp_timer_stop(s_readvertise_timer);
+
     // Not currently advertising is a normal case (already connected, or
     // never started advertising this cycle) - ble_gap_adv_stop()'s
     // BLE_HS_EALREADY-ish "wasn't advertising" return is expected and
     // harmless, not logged as an error.
     ble_gap_adv_stop();
 
-    // esp_hidd_dev_deinit() -> esp_hid's nimble_hidd.c's
-    // nimble_hid_stop_gatts() (read from ESP-IDF's own source, not
-    // assumed) already disconnects the current connection if any, then
-    // stops the GATT server and deinits the HID/DIS/BAS/SPS/GATT/GAP
-    // service layers - the actual symmetric counterpart to
-    // esp_hidd_dev_init() above.
+    // esp_hidd_dev_deinit() -> nimble_hidd_fork.c's (forked) HID device
+    // profile: disconnects the current connection if any, then stops the
+    // GATT server and deinits the HID/DIS/BAS/SPS/GATT/GAP service layers -
+    // the actual symmetric counterpart to kvm_ble_hidd_dev_init() above.
+    // This used to be the *original*, unforked esp_hid nimble_hidd.c, which
+    // crashed real hardware here (LoadProhibited in ble_gatts_free_mem()) -
+    // its own internal ble_gatts_stop() call collided with the *other*
+    // ble_gatts_stop() call esp_hid_gap_deinit() below makes via
+    // esp_nimble_deinit()->ble_hs_deinit(), a redundant double-teardown of
+    // the same NimBLE GATT internals. nimble_hidd_fork.c's
+    // nimble_hid_stop_gatts() no longer makes that call itself - see its
+    // own comment - so esp_hid_gap_deinit()'s is now the only one. See
+    // mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md's follow-up for the
+    // full history (including the addr2line-resolved crash trace) and why
+    // forking was chosen over just leaving the controller/host resident
+    // across ble_toggle(false) cycles.
     if (s_hid_dev != NULL) {
         esp_hidd_dev_deinit(s_hid_dev);
         s_hid_dev = NULL;
+    }
+
+    // Normally it's hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case
+    // (above) that calls wifi_manager_resume() when a
+    // ble_wifi_off_while_connected-suspended connection ends - but that
+    // event never arrives for *this* disconnect: nimble_hidd_fork.c's
+    // nimble_hid_stop_gatts() (just run via esp_hidd_dev_deinit() above)
+    // unregisters its own GAP event listener *before* calling
+    // ble_gap_terminate() to drop the connection, so its own
+    // nimble_hid_gap_event() - the thing that would otherwise post
+    // ESP_HIDD_DISCONNECT_EVENT up to hidd_event_callback() - never runs
+    // for it. (esp_hid_gap.c's *separate* raw GAP listener still logs its
+    // own "disconnect; reason=..." line regardless - that's a different
+    // listener, unaffected.) Real-hardware symptom this caused: LED still
+    // showing advertising/on, but WiFi never actually came back (no ping)
+    // after ble_toggle(false) while ble_wifi_off_while_connected was
+    // active and a peer was connected. Do the resume here instead, since
+    // this is the one place guaranteed to run exactly once per stop().
+    if (was_connected && mruby_filter_ble_wifi_off_while_connected()) {
+        esp_err_t err = wifi_manager_resume();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "wifi_manager_resume() failed: %s", esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "ble_wifi_off_while_connected: WiFi resumed (ble_toggle false while connected)");
+        }
     }
 
     // nimble_port_stop() only *requests* the NimBLE host event loop to
