@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "nvs.h"
@@ -229,4 +230,64 @@ esp_err_t debug_stream_stop(void)
     s_httpd = NULL;
     ESP_LOGI(TAG, "debug stream stopped");
     return err;
+}
+
+// ── Boot-time backlog ───────────────────────────────────────────────────
+// See debug_stream.h's doc comment on this section for the motivation
+// (mruby_filter_init()'s debug_print() calls run before this file's httpd
+// instance - or even its queue - can possibly exist).
+//
+// PSRAM (MALLOC_CAP_SPIRAM), not internal SRAM: this data has no latency
+// requirement (rendered into an HTTP response once per WebUI page load,
+// not touched on any hot path), and internal SRAM is the genuinely scarce
+// resource here once BLE is resident (mds/usb_hid/2026-09-09_ble_webui_syntax_check_oom.md
+// measured its largest free block dropping from 61440 to 17408 bytes from
+// that alone) - mirrors mruby_alloc_psram.c's own reasoning for moving
+// mruby's heap off internal SRAM entirely. Confirmed safe to allocate
+// this early: the boot log shows esp_psram's pool already added to the
+// heap allocator (`esp_psram: Adding pool of 8192K of PSRAM memory...`)
+// well before app_main() itself starts, let alone mruby_filter_init().
+static char (*s_backlog)[DEBUG_BACKLOG_LINE_MAX]; // lazily heap_caps_malloc()'d
+static int s_backlog_next;   // ring buffer write cursor
+static int s_backlog_count;  // how many valid lines so far (<= DEBUG_BACKLOG_LINES)
+
+void debug_stream_record_recent(const char *line)
+{
+    if (s_backlog == NULL) {
+        s_backlog = heap_caps_malloc(DEBUG_BACKLOG_LINES * sizeof(*s_backlog), MALLOC_CAP_SPIRAM);
+        if (s_backlog == NULL) {
+            return; // PSRAM alloc failed - just skip the backlog, not fatal
+        }
+    }
+    strncpy(s_backlog[s_backlog_next], line, DEBUG_BACKLOG_LINE_MAX - 1);
+    s_backlog[s_backlog_next][DEBUG_BACKLOG_LINE_MAX - 1] = '\0';
+    s_backlog_next = (s_backlog_next + 1) % DEBUG_BACKLOG_LINES;
+    if (s_backlog_count < DEBUG_BACKLOG_LINES) {
+        s_backlog_count++;
+    }
+}
+
+size_t debug_stream_recent_backlog(char *buf, size_t buf_size)
+{
+    if (buf_size == 0) {
+        return 0;
+    }
+    if (s_backlog == NULL || s_backlog_count == 0) {
+        buf[0] = '\0';
+        return 0;
+    }
+    // Oldest first: once the ring has wrapped (count == DEBUG_BACKLOG_LINES),
+    // the oldest line is the one right after the next write slot;
+    // otherwise nothing has wrapped yet and the oldest is simply index 0.
+    int start = (s_backlog_count < DEBUG_BACKLOG_LINES) ? 0 : s_backlog_next;
+    size_t off = 0;
+    for (int i = 0; i < s_backlog_count; i++) {
+        int idx = (start + i) % DEBUG_BACKLOG_LINES;
+        int n = snprintf(buf + off, buf_size - off, "%s\n", s_backlog[idx]);
+        if (n < 0 || (size_t)n >= buf_size - off) {
+            break; // wouldn't fit - stop rather than truncate mid-line
+        }
+        off += (size_t)n;
+    }
+    return off;
 }

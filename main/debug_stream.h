@@ -2,6 +2,7 @@
 #define DEBUG_STREAM_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "esp_err.h"
 
@@ -81,5 +82,44 @@ esp_err_t debug_stream_start(void);
 // against esp_http_server's own httpd_stop()/httpd_server() source, not
 // just assumed).
 esp_err_t debug_stream_stop(void);
+
+// ── Boot-time backlog (separate from the SSE stream above) ─────────────
+//
+// mruby_filter_init() - and therefore any debug_print() call inside a
+// script's top-level source/sink/pipeline code, e.g. an error message a
+// script's own `rescue` chose to log rather than let crash the load -
+// runs before WiFi even starts, let alone this file's httpd instance
+// (which doesn't exist yet at that point, and couldn't be reached over
+// the network even if it did). Those lines can never reach the SSE
+// stream above no matter how quickly a viewer connects afterward - it's
+// not a timing race, the receiving end genuinely doesn't exist yet. See
+// mds/usb_hid/2026-09-10_mruby_debug_stream.md's follow-up.
+//
+// This keeps the last DEBUG_BACKLOG_LINES debug_print() lines (always,
+// regardless of debug_print_to's :uart/:http selection - see
+// mruby_filter.c's dsl_debug_print()) in a small ring buffer that exists
+// from the very first call (lazily allocated, no init() call needed, so
+// it's already there during mruby_filter_init() itself), exposed via
+// mruby_webui.c's /api/status - fetched unconditionally on every WebUI
+// page load, so simply reloading after any reboot (e.g. the Save button's
+// automatic reload) shows what a script's earliest debug_print() calls
+// said, without needing to catch a live stream or fall back to UART.
+#define DEBUG_BACKLOG_LINES    16
+#define DEBUG_BACKLOG_LINE_MAX 120
+
+// Always records one line into the backlog ring buffer (oldest dropped
+// once full) - unlike debug_stream_push() above, not gated on the httpd
+// instance being started (there may not even be a queue yet - see this
+// section's doc comment) and never silently a no-op except on the one
+// genuine PSRAM allocation failure case. Safe to call from mruby's
+// dispatch path (same reasoning as debug_stream_push()): just a memcpy
+// into an already-allocated buffer, no I/O, no blocking.
+void debug_stream_record_recent(const char *line);
+
+// Renders the backlog (oldest first, one per line, newline-terminated)
+// into buf. Returns the number of bytes written (excluding the NUL
+// terminator), 0 if nothing has been recorded yet (or the one-time PSRAM
+// allocation failed). Used by mruby_webui.c's /api/status handler.
+size_t debug_stream_recent_backlog(char *buf, size_t buf_size);
 
 #endif

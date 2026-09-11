@@ -414,6 +414,14 @@ static mrb_value dsl_debug_print(mrb_state *mrb, mrb_value self)
             if (s_debug_print_http_enabled) {
                 debug_stream_push(RSTRING_PTR(s));
             }
+            // Always, independent of debug_print_to's :uart/:http choice
+            // above - this is what catches a script's boot-time
+            // debug_print() calls (e.g. a rescued sink()/pipeline() error
+            // - see mds/usb_hid/2026-09-11_sink_limit_exhausted.md) on the
+            // WebUI's /api/status even though neither :uart nor :http
+            // could possibly have been "watched live" for the earliest
+            // ones - see debug_stream.h's "Boot-time backlog" section.
+            debug_stream_record_recent(RSTRING_PTR(s));
         }
     }
     return mrb_nil_value();

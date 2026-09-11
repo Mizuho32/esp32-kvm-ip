@@ -206,11 +206,19 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                                 : ota_state == ESP_OTA_IMG_ABORTED        ? "aborted"
                                                                           : "undefined";
 
-    char buf[384];
+    // Boot-time debug_print() backlog (mds/usb_hid/2026-09-10_mruby_debug_stream.md's
+    // follow-up) - fetched unconditionally on every page load, unlike the
+    // SSE stream, so this is what actually surfaces a script's earliest
+    // debug_print() calls (before WiFi/this httpd instance even exist).
+    char backlog[DEBUG_BACKLOG_LINES * DEBUG_BACKLOG_LINE_MAX];
+    debug_stream_recent_backlog(backlog, sizeof(backlog));
+
+    char buf[384 + sizeof(backlog)];
     const char *hostname = mruby_filter_hostname();
     int n = snprintf(buf, sizeof(buf),
                       "mruby: %s\nhostname: %s\nfrontend: %s\nble: %s\ndebug_stream: %s (port %d)\n"
-                      "firmware: %s (%s)\n",
+                      "firmware: %s (%s)\n"
+                      "debug_print backlog (this boot, oldest first):\n%s",
                       mruby_filter_active() ? "active" : "inactive (C filter_rules.h/route_rules.h fallback in effect)",
                       hostname ? hostname : "(not set by script)",
                       custom_frontend ? "custom (uploaded via UART)" : "embedded default",
@@ -218,7 +226,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                       debug_stream_active() ? "active" : "inactive",
                       DEBUG_STREAM_PORT,
                       running ? running->label : "?",
-                      ota_state_str);
+                      ota_state_str,
+                      backlog[0] ? backlog : "(none)\n");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store"); // same reasoning as script_get_handler()
     return httpd_resp_send(req, buf, (ssize_t)n);
