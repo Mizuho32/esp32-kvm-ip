@@ -93,10 +93,21 @@ CONFIG_BT_CONTROLLER_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 # esp_hid's NimBLE HOGP backend (nimble_hidd.c) is entirely compiled out
 # without this - defaults to n upstream since most NimBLE users don't
-# need a HID *service* (as opposed to just BLE in general). Its default
-# CONFIG_BT_NIMBLE_SVC_HID_MAX_RPTS=3 already matches ble_hid_device.c's
-# 3 report IDs (keyboard/mouse/consumer), so left unset.
+# need a HID *service* (as opposed to just BLE in general).
 CONFIG_BT_NIMBLE_HID_SERVICE=y
+# Must count every *report-mode* report ble_hid_device.c's combined
+# report map declares (Boot-mode Keyboard/Mouse duplicates don't count -
+# see nimble_hidd.c's create_hid_db(), which registers those via a
+# separate always-on kbd_inp_present/mouse_inp_present flag instead of
+# this counted array) - currently 4: keyboard, mouse, consumer, system
+# control (mds/usb_hid/2026-09-10_system_control_sleep.md). Left at the
+# default (3) after adding system control was a real bug found by
+# reading create_hid_db() itself: reports beyond this count are silently
+# dropped (`report_mode_rpts >= MAX_REPORTS` -> `break`, no error
+# surfaced anywhere else) - see
+# mds/usb_hid/2026-09-10_system_control_sleep.md's follow-up. Bump this
+# again if another BLE report-mode kind is ever added.
+CONFIG_BT_NIMBLE_SVC_HID_MAX_RPTS=4
 
 # NimBLE's own host-stack logging (tag "NimBLE" - MODLOG_DFLT()/BLE_HS_LOG()
 # calls sprinkled through the host source and esp_hid_gap.c's vendored GAP
