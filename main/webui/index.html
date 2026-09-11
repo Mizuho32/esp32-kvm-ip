@@ -80,6 +80,12 @@
   its own afterwards instead of needing "Start" clicked again after every
   save - only clicking "Stop" actually turns it off for good. One viewer
   at a time is the expected use.
+  The log also shows a one-time "boot-time backlog" (marked as such)
+  ahead of anything live - <code>debug_print(...)</code> calls the
+  script made before this page could possibly have been watching (e.g.
+  during startup, before WiFi/this WebUI even exist) still get captured
+  and are visible on the next time you load this page, whether or not
+  the stream was running at the time.
 </p>
 <p class="hint">
   "Update firmware" flashes a new esp32-kvm-ip <code>.bin</code> (an
@@ -161,11 +167,33 @@ function setDebugButtonState(active) {
   debugToggleBtn.disabled = false;
 }
 
+// /api/status appends the boot-time debug_print backlog (see
+// debug_stream.h's "Boot-time backlog" section) after this exact marker
+// line - split it out so it lands in the same log view as the live SSE
+// stream below instead of a separate box (there's no real reason to keep
+// the two apart - it's the same debug_print() output either way, just
+// from before this page could have been watching live).
+const BACKLOG_MARKER = 'debug_print backlog (this boot, oldest first):\n';
+let backlogShown = false; // only ever inject it once, not on every loadStatus() call
+
 async function loadStatus() {
   try {
     const res = await fetch('/api/status');
     const text = await res.text();
-    statusEl.textContent = text;
+    const markerIdx = text.indexOf(BACKLOG_MARKER);
+    const statusText = markerIdx === -1 ? text : text.slice(0, markerIdx).trimEnd();
+    statusEl.textContent = statusText;
+
+    if (!backlogShown && markerIdx !== -1) {
+      backlogShown = true;
+      const backlog = text.slice(markerIdx + BACKLOG_MARKER.length).trimEnd();
+      if (backlog && backlog !== '(none)') {
+        appendDebugLine('── boot-time backlog (before this page could watch live) ──');
+        for (const line of backlog.split('\n')) { appendDebugLine(line); }
+        appendDebugLine('── live from here ──');
+      }
+    }
+
     // The board (not this tab) is the source of truth for whether the
     // stream is running - this is what lets the toggle button and the
     // log itself survive a page reload/reopen without losing track of
