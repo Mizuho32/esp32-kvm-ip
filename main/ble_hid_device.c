@@ -456,7 +456,7 @@ esp_err_t ble_hid_device_start(void)
 // short of s_readvertise_timer/s_nimble_host_stopped_sem themselves (see
 // their declaration comment - those two stay allocated forever so a
 // later ble_hid_device_start() never has to recreate them). Called by
-// mruby_filter.c's `ble_enable false` (see
+// mruby_filter.c's `ble_toggle false` (see
 // mds/usb_hid/2026-09-11_ble_dynamic_enable.md) - blocks its caller for
 // roughly as long as the BT controller/NimBLE host take to actually shut
 // down (not instantaneous, unlike most of this file's other calls - see

@@ -155,8 +155,8 @@ bool mruby_filter_ble_wifi_off_while_connected(void);
 // mruby_filter_ble_sink_declared()'s auto-start-at-boot behavior above -
 // main_host.c then never calls ble_hid_device_start() on its own, no
 // matter how many `:ble` sinks are declared. The script is then
-// responsible for calling `ble_enable(true)`/`ble_enable(false)`
-// (ruby_ble_enable() -> ble_hid_device_start()/_stop()) itself, typically
+// responsible for calling `ble_toggle(true)`/`ble_toggle(false)`
+// (ruby_ble_toggle() -> ble_hid_device_start()/_stop()) itself, typically
 // from a :keyboard pipeline's to()/branch() block reacting to some chosen
 // key combo - lets BLE (and its permanent RAM cost + WiFi-coexistence
 // radio contention, see mruby_filter_ble_wifi_off_while_connected()'s doc
@@ -168,7 +168,7 @@ bool mruby_filter_ble_wifi_off_while_connected(void);
 // runtime call (e.g. from inside a branch() block) is too late to affect
 // this check. Defaults to *false* (preserves the original always-on
 // behavior for any existing script that only ever calls
-// `sink :name, :ble, ...` and never touches ble_dynamic/ble_enable at
+// `sink :name, :ble, ...` and never touches ble_dynamic/ble_toggle at
 // all). See mds/usb_hid/2026-09-11_ble_dynamic_enable.md.
 bool mruby_filter_ble_dynamic(void);
 

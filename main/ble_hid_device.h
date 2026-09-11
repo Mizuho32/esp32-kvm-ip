@@ -59,7 +59,7 @@ esp_err_t ble_hid_device_start(void);
  * stops the NimBLE host task, disables+deinits the BT controller) - a
  * later ble_hid_device_start() call brings it all back. A no-op
  * returning ESP_OK if not currently started. Exposed for
- * mruby_filter.c's `ble_enable false` DSL call
+ * mruby_filter.c's `ble_toggle false` DSL call
  * (mds/usb_hid/2026-09-11_ble_dynamic_enable.md) - lets a script turn
  * BLE off again at runtime (e.g. via a keyboard shortcut), not just on.
  * Blocks its caller for roughly as long as the underlying stack actually
@@ -84,7 +84,7 @@ bool ble_hid_device_connected(void);
  *         ble_hid_device_stop()) - regardless of whether a peer is
  *         actually connected right now. Distinct from
  *         ble_hid_device_connected() above, which additionally requires
- *         a live connection. Exposed for mruby_filter.c's `ble_enable`
+ *         a live connection. Exposed for mruby_filter.c's `ble_toggle`
  *         DSL call's no-argument toggle form (flips based on the real
  *         state rather than a script-tracked guess) - see
  *         mds/usb_hid/2026-09-11_ble_dynamic_enable.md's follow-up.
