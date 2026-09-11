@@ -131,6 +131,45 @@ sink :typec_cc,    :typec, kind: :consumer
 #   }
 # end
 
+# BLE multi-device pairing "slots" (mds/usb_hid/2026-09-12_ble_multi_pair.md) -
+# like the Fn+1/2/3 device-switching button on many commercial Bluetooth
+# keyboards/mice. Up to 3 slots, each remembering one bonded peer
+# (persisted in NVS - survives reboots/ble_toggle cycles). Requires the
+# BLE stack to actually be running (ble_toggle true, or omit ble_dynamic
+# so :ble sinks auto-start it).
+#
+# `ble_pair_switch(n)` (n = 1..3): reconnect to whichever device is
+# already bonded in slot n (directed advertising - only that device can
+# connect). `ble_pair_new(n)`: forget slot n's old bond and open it up to
+# pair a brand new device (undirected advertising, like before slots
+# existed) - whichever device connects next gets remembered there.
+# `ble_pair_slot` reads back the current slot (nil if idle - nothing
+# active). Disconnecting a slot's device deliberately (e.g. from the PC's
+# own Bluetooth settings) leaves that slot idle rather than fighting to
+# reconnect - call ble_pair_switch/_new again to reconnect or use a
+# different slot.
+#
+# pipeline :keyboard do
+#   from :local_kbd
+#   to(:typec_kbd) { |ev|
+#     # left-Ctrl+left-Alt+1/2/3 (modifiers bit0|bit2 = 0x05, keycodes
+#     # 0x1e/0x1f/0x20 = 1/2/3) - adjust to taste.
+#     if ev[:modifiers] & 0x05 == 0x05
+#       slot = { 0x1e => 1, 0x1f => 2, 0x20 => 3 }[ev[:keycodes].first]
+#       if slot
+#         if ble_pair_slot_bonded?(slot)
+#           ble_pair_switch(slot)
+#         else
+#           ble_pair_new(slot) # empty slot - open it for a new device
+#         end
+#         debug_print "BLE pairing: switching to slot #{slot}"
+#         next nil
+#       end
+#     end
+#     ev
+#   }
+# end
+
 pipeline :keyboard do
   from :local_kbd
   to :typec_kbd   # no block = pure passthrough fan-out

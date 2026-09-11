@@ -25,6 +25,7 @@
 #include "mruby/throw.h"
 
 #include "ble_hid_device.h"
+#include "ble_pair_slots.h"
 #include "debug_stream.h"
 #include "hid_forwarder.h"
 #include "mruby_alloc_psram.h"
@@ -1032,6 +1033,55 @@ static mrb_value ruby_ble_connected_p(mrb_state *mrb, mrb_value self)
     return mrb_bool_value(ble_hid_device_connected());
 }
 
+// `ble_pair_switch(n)`/`ble_pair_new(n)` - multi-device BLE pairing slots
+// (mds/usb_hid/2026-09-12_ble_multi_pair.md), n is 1..BLE_PAIR_SLOT_COUNT.
+// Both just log a warning on failure (bad slot number, BLE stack not
+// started, or - ble_pair_switch only - an empty/never-bonded slot) rather
+// than raising, matching ble_toggle's own "don't crash the script over a
+// BLE hiccup" precedent.
+static mrb_value ruby_ble_pair_switch(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_int slot;
+    mrb_get_args(mrb, "i", &slot);
+    esp_err_t err = ble_pair_switch((int)slot);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ble_pair_switch(%d) failed: %s", (int)slot, esp_err_to_name(err));
+    }
+    return mrb_nil_value();
+}
+
+static mrb_value ruby_ble_pair_new(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_int slot;
+    mrb_get_args(mrb, "i", &slot);
+    esp_err_t err = ble_pair_new((int)slot);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ble_pair_new(%d) failed: %s", (int)slot, esp_err_to_name(err));
+    }
+    return mrb_nil_value();
+}
+
+// Read-only query counterparts, same spirit as ble_started?/ble_connected?
+// above - `ble_pair_slot` returns nil while idle (no slot currently
+// active), else the 1-based slot number (an Integer, not 0-based, to
+// match the argument convention ble_pair_switch/_new use).
+static mrb_value ruby_ble_pair_slot(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    int slot = ble_pair_current_slot();
+    return slot < 0 ? mrb_nil_value() : mrb_fixnum_value(slot);
+}
+
+static mrb_value ruby_ble_pair_slot_bonded_p(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_int slot;
+    mrb_get_args(mrb, "i", &slot);
+    return mrb_bool_value(ble_pair_slot_bonded((int)slot));
+}
+
 // `debug_print_to(*syms)` - explicitly sets which destination(s)
 // debug_print() writes to, replacing the previous set entirely (same
 // "fully controlled by the script's call" convention as
@@ -1178,6 +1228,10 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "ble_toggle", ruby_ble_toggle, MRB_ARGS_OPT(1));
     mrb_define_method(mrb, k, "ble_started?", ruby_ble_started_p, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "ble_connected?", ruby_ble_connected_p, MRB_ARGS_NONE());
+    mrb_define_method(mrb, k, "ble_pair_switch", ruby_ble_pair_switch, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "ble_pair_new", ruby_ble_pair_new, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "ble_pair_slot", ruby_ble_pair_slot, MRB_ARGS_NONE());
+    mrb_define_method(mrb, k, "ble_pair_slot_bonded?", ruby_ble_pair_slot_bonded_p, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));

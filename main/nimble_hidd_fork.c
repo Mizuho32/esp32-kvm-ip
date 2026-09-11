@@ -409,6 +409,23 @@ static bool nimble_hidd_dev_connected(void *devp)
     return (dev != NULL && s_dev == dev && dev->connected);
 }
 
+// Added (upstream's dev_p->disconnect is never wired up at all, for
+// either the BLE or the Classic backend - a plain gap, not something this
+// fork changed the *meaning* of) so ble_hid_device.c can expose a
+// disconnect-the-current-peer call for ble_pair_slots.c to use when
+// switching slots - see mds/usb_hid/2026-09-12_ble_multi_pair.md.
+static int nimble_hidd_dev_disconnect(void *devp)
+{
+    esp_ble_hidd_dev_t *dev = (esp_ble_hidd_dev_t *)devp;
+    if (!dev || s_dev != dev) {
+        return ESP_FAIL;
+    }
+    if (!dev->connected) {
+        return ESP_OK; // nothing to do - idempotent
+    }
+    return ble_gap_terminate(dev->conn_id, BLE_ERR_REM_USER_CONN_TERM);
+}
+
 static int nimble_hidd_dev_battery_set(void *devp, uint8_t level)
 {
     int rc;
@@ -856,6 +873,7 @@ static esp_err_t esp_ble_hidd_dev_init(esp_hidd_dev_t *dev_p, const esp_hid_devi
     dev_p->dev = s_dev;
     dev_p->connected = nimble_hidd_dev_connected;
     dev_p->deinit = nimble_hidd_dev_deinit;
+    dev_p->disconnect = nimble_hidd_dev_disconnect;
     dev_p->battery_set = nimble_hidd_dev_battery_set;
     dev_p->input_set = nimble_hidd_dev_input_set;
     dev_p->feature_set = nimble_hidd_dev_feature_set;
@@ -926,6 +944,14 @@ esp_err_t kvm_ble_hidd_dev_init(const esp_hid_device_config_t *config, esp_event
     dev->transport = ESP_HID_TRANSPORT_BLE;
     *dev_out = dev;
     return ESP_OK;
+}
+
+esp_err_t kvm_ble_hidd_dev_disconnect(esp_hidd_dev_t *dev)
+{
+    if (dev == NULL || dev->disconnect == NULL) {
+        return ESP_FAIL;
+    }
+    return dev->disconnect(dev->dev);
 }
 
 #endif // CONFIG_BT_NIMBLE_HID_SERVICE

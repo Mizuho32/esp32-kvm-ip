@@ -114,4 +114,15 @@ void ble_hid_device_system_control_report(uint16_t usage_id);
  */
 void ble_hid_device_unpair(void);
 
+/**
+ * Gracefully disconnects whatever's currently connected, if anything - a
+ * no-op otherwise. Exposed for ble_pair_slots.c's ble_pair_switch()/
+ * ble_pair_new() (mds/usb_hid/2026-09-12_ble_multi_pair.md), which need to
+ * drop the current connection before switching to a different slot.
+ * Asynchronous - the actual disconnect (and whatever ble_pair_slots.c
+ * queued up to happen once it completes) shows up later as the usual
+ * ESP_HIDD_DISCONNECT_EVENT/BLE_GAP_EVENT_DISCONNECT.
+ */
+void ble_hid_device_disconnect_current(void);
+
 #endif

@@ -36,6 +36,9 @@
 #include "esp_gap_bt_api.h"
 #endif
 #include "esp_hid_common.h"
+#if CONFIG_BT_NIMBLE_ENABLED
+#include "nimble/ble.h" // ble_addr_t, for esp_hid_ble_gap_adv_start()'s optional direct_addr
+#endif
 #if CONFIG_BT_BLE_ENABLED
 #include "esp_gattc_api.h"
 #include "esp_gatt_defs.h"
@@ -77,7 +80,17 @@ esp_err_t esp_hid_gap_init(uint8_t mode);
 esp_err_t esp_hid_gap_deinit(void);
 
 esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name);
+
+#if CONFIG_BT_NIMBLE_ENABLED
+// direct_addr NULL = undirected/general advertising - anyone can connect
+// (the only mode this used to have). Non-NULL = *directed* advertising:
+// only that one peer's link layer will even see a connectable
+// advertisement from this device at all - see
+// mds/usb_hid/2026-09-12_ble_multi_pair.md and ble_pair_slots.h.
+esp_err_t esp_hid_ble_gap_adv_start(const ble_addr_t *direct_addr);
+#else
 esp_err_t esp_hid_ble_gap_adv_start(void);
+#endif
 
 #ifdef __cplusplus
 }

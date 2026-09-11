@@ -17,7 +17,6 @@
 #include "esp_hidd.h"
 #include "esp_hid_gap.h"
 #include "esp_log.h"
-#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -29,6 +28,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 
+#include "ble_pair_slots.h"
 #include "mruby_filter.h"
 #include "nimble_hidd_fork.h"
 #include "status_led.h"
@@ -214,18 +214,6 @@ static bool s_ignore_disconnect_events;
 // disconnect.
 static void ble_hid_mouse_pending_reset(void);
 
-// Re-advertising after a *deliberate* disconnect (see
-// hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case) used to be
-// held off for a blanket 30s whenever mruby_filter_ble_wifi_off_while_connected()
-// was enabled - replaced (mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md's
-// follow-up) by esp_hid_gap.c's own peer-address-based rejection: that
-// file remembers *which* peer just deliberately disconnected and bounces
-// only *that* peer's next reconnect attempt for a while, so re-advertising
-// can (and now does) resume immediately here - a *different* device can
-// pair right away, matching how ordinary BLE peripherals (earbuds, mice)
-// behave, while the peer that was just told to go away still can't
-// silently reconnect for a while.
-//
 // Created once, on the first ever ble_hid_device_start(), and kept
 // forever (never vSemaphoreDelete()'d) - mirrors debug_stream.c's
 // immortal-queue design (mds/usb_hid/2026-09-10_mruby_debug_stream.md):
@@ -233,39 +221,6 @@ static void ble_hid_mouse_pending_reset(void);
 // actual heavy BLE/NimBLE stack itself toggled by
 // ble_hid_device_start()/_stop() (mds/usb_hid/2026-09-11_ble_dynamic_enable.md).
 static SemaphoreHandle_t s_nimble_host_stopped_sem;
-
-// esp_hid_gap.c's peer-address rejection (should_reject_reconnect()) stops
-// the *same* peer from silently reconnecting, but real-hardware testing
-// found it still isn't enough on its own: that peer's OS typically fires
-// off a rapid burst of reconnect attempts right after the deliberate
-// disconnect, and each one still completes a full link-layer connection
-// before esp_hid_gap.c's GAP handler notices and terminates it - visible
-// on the peer side as a stressful few seconds of connect/drop flicker
-// (and on ours, log spam). Ordinary BLE peripherals (earbuds, mice) avoid
-// this by briefly going dark instead: stop advertising for a short window
-// right after a deliberate disconnect, so that whole opening burst finds
-// nothing to connect to and gives up (most OS BT stacks don't keep
-// hammering forever - they retry hard for a moment, then back off), then
-// go back to normal advertising. This is that same idea, just much
-// shorter than the old blanket 30s holdoff it replaced: short enough that
-// pairing a genuinely *different* device is barely delayed, long enough
-// to outlast the peer's initial reconnect burst. esp_hid_gap.c's
-// peer-specific rejection stays in place underneath as a backstop for
-// stragglers that show up after this window closes.
-//
-// Created once, on the first ever ble_hid_device_start(), and kept
-// forever (never esp_timer_delete()'d) - same immortal-primitive pattern
-// as s_nimble_host_stopped_sem right above.
-#define BLE_DELIBERATE_DISCONNECT_ADV_BLACKOUT_US (3 * 1000 * 1000)
-static esp_timer_handle_t s_readvertise_timer;
-
-static void readvertise_timer_cb(void *arg)
-{
-    (void)arg;
-    ESP_LOGI(TAG, "resuming advertising (deliberate-disconnect blackout elapsed)");
-    esp_hid_ble_gap_adv_start();
-    status_led_set_ble_advertising(true);
-}
 
 // ═══════════════════════════════════════════════════════════════════
 //  HID device event callback
@@ -280,9 +235,12 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
 
     switch (event) {
     case ESP_HIDD_START_EVENT:
-        ESP_LOGI(TAG, "started, advertising");
-        esp_hid_ble_gap_adv_start();
-        status_led_set_ble_advertising(true);
+        ESP_LOGI(TAG, "started");
+        // ble_pair_slots.c decides whether/who to advertise to (directed
+        // at whichever slot was last active, or stay idle if none ever
+        // was) - see mds/usb_hid/2026-09-12_ble_multi_pair.md.
+        ble_pair_slots_resume_on_start();
+        status_led_set_ble_advertising(ble_pair_current_slot() >= 0);
         break;
     case ESP_HIDD_CONNECT_EVENT:
         ESP_LOGI(TAG, "connected");
@@ -350,27 +308,13 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
             }
         }
 
-        // Deliberate disconnect (see s_readvertise_timer's doc comment
-        // above): go dark for a short blackout instead of resuming
-        // advertising right away, so the peer's own rapid reconnect burst
-        // finds nothing and gives up. Any other disconnect reason (out of
-        // range, etc.) resumes immediately as before - only an
-        // intentional disconnect needs this.
-        if (param->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM)) {
-            ESP_LOGI(TAG, "deliberate disconnect - going dark for %d ms before re-advertising",
-                     BLE_DELIBERATE_DISCONNECT_ADV_BLACKOUT_US / 1000);
-            esp_err_t err = esp_timer_start_once(s_readvertise_timer, BLE_DELIBERATE_DISCONNECT_ADV_BLACKOUT_US);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "esp_timer_start_once (readvertise blackout) failed: %s - "
-                         "resuming advertising immediately instead", esp_err_to_name(err));
-                esp_hid_ble_gap_adv_start();
-                status_led_set_ble_advertising(true);
-            }
-        } else {
-            ESP_LOGI(TAG, "resuming advertising");
-            esp_hid_ble_gap_adv_start();
-            status_led_set_ble_advertising(true);
-        }
+        // Whether/who to re-advertise to now is entirely ble_pair_slots.c's
+        // call (esp_hid_gap.c's nimble_hid_gap_event() already invoked
+        // ble_pair_slots_on_disconnect() for this same disconnect, from
+        // its own listener - it has the disconnect reason and, unlike
+        // this event, the peer's address too). Just reflect whatever slot
+        // state that left behind on the status LED.
+        status_led_set_ble_advertising(ble_pair_current_slot() >= 0);
         break;
     case ESP_HIDD_STOP_EVENT:
         ESP_LOGI(TAG, "stopped");
@@ -441,18 +385,6 @@ esp_err_t ble_hid_device_start(void)
             return ESP_ERR_NO_MEM;
         }
     }
-    if (s_readvertise_timer == NULL) {
-        const esp_timer_create_args_t timer_args = {
-            .callback = readvertise_timer_cb,
-            .name = "ble_readvertise",
-        };
-        esp_err_t err = esp_timer_create(&timer_args, &s_readvertise_timer);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_timer_create (readvertise blackout) failed: %s", esp_err_to_name(err));
-            return err;
-        }
-    }
-
     esp_err_t ret = esp_hid_gap_init(HIDD_BLE_MODE);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_hid_gap_init failed: %s", esp_err_to_name(ret));
@@ -529,12 +461,6 @@ esp_err_t ble_hid_device_stop(void)
     // function returns (see s_ignore_disconnect_events' doc comment) -
     // must not touch WiFi or advertising.
     s_ignore_disconnect_events = true;
-
-    // Cancel any pending post-deliberate-disconnect blackout - if it fired
-    // after the teardown below, readvertise_timer_cb() would be calling
-    // into a NimBLE stack that no longer exists. esp_timer_stop() on an
-    // already-idle timer just returns ESP_ERR_INVALID_STATE, harmless.
-    esp_timer_stop(s_readvertise_timer);
 
     // Not currently advertising is a normal case (already connected, or
     // never started advertising this cycle) - ble_gap_adv_stop()'s
@@ -622,6 +548,13 @@ bool ble_hid_device_connected(void)
 bool ble_hid_device_started(void)
 {
     return s_started;
+}
+
+void ble_hid_device_disconnect_current(void)
+{
+    if (s_hid_dev != NULL && s_connected) {
+        kvm_ble_hidd_dev_disconnect(s_hid_dev);
+    }
 }
 
 void ble_hid_device_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6])
@@ -743,18 +676,19 @@ void ble_hid_device_unpair(void)
     if (!s_started) {
         return;
     }
-    // MVP: wipe every stored bond (ble_store_config's NVS-backed store) -
-    // fine for a single-PC-at-a-time device. Takes effect immediately for
-    // future connection attempts; if a PC is connected *right now*, this
-    // doesn't forcibly kick it (conn_handle isn't exposed by esp_hidd's
-    // public event API) - it'll just fail to re-bond on its next
-    // reconnect. Good enough for the MVP (mds/usb_hid/2026-09-07_ble_hid_sink_plan.md's
-    // "複数PCとのボンディング切り替えは保留" - revisit if this proves
-    // annoying in practice.
+    // Wipes *every* stored bond (NimBLE's own ble_store_config NVS store)
+    // and every ble_pair_slots.c slot's remembered peer alike - the WebUI's
+    // "Unpair" button is a full reset, not a per-slot operation (use
+    // ble_pair_new() from the script for that instead - see
+    // mds/usb_hid/2026-09-12_ble_multi_pair.md). Disconnects whatever's
+    // currently connected first so the reset is immediate rather than
+    // waiting for that peer to eventually drop on its own.
+    ble_hid_device_disconnect_current();
+    ble_pair_slots_forget_all();
     int rc = ble_store_clear();
     if (rc != 0) {
         ESP_LOGW(TAG, "ble_store_clear failed: %d", rc);
     } else {
-        ESP_LOGI(TAG, "unpaired (all bonds cleared)");
+        ESP_LOGI(TAG, "unpaired (all bonds and slots cleared)");
     }
 }

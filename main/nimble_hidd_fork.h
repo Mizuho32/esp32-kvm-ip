@@ -20,6 +20,14 @@ extern "C" {
 // esp_hid's original.
 esp_err_t kvm_ble_hidd_dev_init(const esp_hid_device_config_t *config, esp_event_handler_t callback, esp_hidd_dev_t **dev_out);
 
+// esp_hidd_dev_t has a `disconnect` function-pointer slot, but neither
+// esp_hidd.c (the generic transport-agnostic layer) nor upstream
+// nimble_hidd.c ever wire up a public call for it - this fork's own
+// kvm_ble_hidd_dev_init() does (nimble_hidd_dev_disconnect() in the .c
+// file), so this is the way to actually reach it: gracefully disconnects
+// whatever's currently connected on `dev`, or ESP_OK no-op if nothing is.
+esp_err_t kvm_ble_hidd_dev_disconnect(esp_hidd_dev_t *dev);
+
 #ifdef __cplusplus
 }
 #endif

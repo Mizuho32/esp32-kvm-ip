@@ -19,13 +19,12 @@
 #include <stdbool.h>
 #include <inttypes.h>
 
-#include "esp_timer.h"
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
 #include "esp_hid_gap.h"
+#include "ble_pair_slots.h"
 
 #if CONFIG_BT_NIMBLE_ENABLED
 #include "host/ble_hs.h"
@@ -835,40 +834,6 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
 
 }
 
-// ── Reject only the peer that just deliberately disconnected ──────────
-// (mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md)
-//
-// ble_hid_device.c used to hold off *all* re-advertising for
-// BLE_REJECT_SAME_PEER_HOLDOFF_US after any deliberate disconnect, to
-// stop that peer from silently reconnecting on its own - but that also
-// blocked a genuinely *different* device from pairing in the meantime,
-// which defeats the actual goal ("don't let the device I just
-// disconnected grab it back", not "don't let anyone connect"). Finer
-// fix: keep advertising uninterrupted, remember *which* peer (identity
-// address) just deliberately disconnected, and bounce only a reconnect
-// attempt from that exact peer for a while - any other peer connects
-// immediately, normally.
-#define BLE_REJECT_SAME_PEER_HOLDOFF_US (30 * 1000 * 1000)
-static ble_addr_t s_reject_peer_addr;
-static bool s_reject_peer_valid;
-static int64_t s_reject_until_us;
-
-// True if a deliberate disconnect (BLE_ERR_REM_USER_CONN_TERM) is what
-// just happened, and addr is the peer that's still within its reject
-// window - i.e. this exact connection attempt should be bounced.
-static bool should_reject_reconnect(const ble_addr_t *addr)
-{
-    if (!s_reject_peer_valid) {
-        return false;
-    }
-    if (esp_timer_get_time() >= s_reject_until_us) {
-        s_reject_peer_valid = false; // window expired - stop tracking, nothing left to reject
-        return false;
-    }
-    return addr->type == s_reject_peer_addr.type &&
-           memcmp(addr->val, s_reject_peer_addr.val, sizeof(addr->val)) == 0;
-}
-
 static int
 nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
 {
@@ -882,16 +847,19 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
                 event->connect.status == 0 ? "established" : "failed",
                 event->connect.status);
         if (event->connect.status == 0) {
-            // Bounce this connection immediately if it's the same peer
-            // that deliberately disconnected recently and is still
-            // within its reject window (see should_reject_reconnect()'s
-            // doc comment) - any other peer, or this same one after the
-            // window expires, falls through and connects normally below.
+            // Tell ble_pair_slots.c which peer this is - if we're
+            // currently in "pairing" mode for some slot (undirected
+            // advertising, see ble_pair_new()), this is what gets that
+            // peer's identity address recorded into the slot. If we were
+            // instead directed-advertising at one specific already-bonded
+            // peer (ble_pair_switch()), only that peer's link layer could
+            // have completed this connection in the first place - nothing
+            // to reject/bounce here at all anymore, unlike the old
+            // accept-then-terminate approach this replaced (see
+            // mds/usb_hid/2026-09-12_ble_multi_pair.md).
             rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
-            if (rc == 0 && should_reject_reconnect(&desc.peer_id_addr)) {
-                ESP_LOGI(TAG, "rejecting reconnect from recently-deliberately-disconnected peer");
-                ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-                return 0;
+            if (rc == 0) {
+                ble_pair_slots_on_connect(&desc.peer_id_addr);
             }
             // Neither this file nor esp_hid's own nimble_hidd.c ever asked
             // for a short connection interval - the only itvl_min/max
@@ -932,17 +900,17 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
         // 0x13 (BLE_ERR_REM_USER_CONN_TERM, offset by BLE_HS_ERR_HCI_BASE
         // in the reason code NimBLE reports) means the *peer* deliberately
         // ended the connection (e.g. the user disconnected from the PC's
-        // own Bluetooth settings) - remember its identity address so
-        // should_reject_reconnect() can bounce just that peer's next
-        // reconnect attempt for a while, without holding off advertising
-        // for anyone else. An involuntary drop (e.g. reason 0x08,
-        // "Connection Timeout" - radio range/interference) doesn't set
-        // this at all, so a real out-of-range reconnect is never delayed.
-        if (event->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM)) {
-            s_reject_peer_addr = event->disconnect.conn.peer_id_addr;
-            s_reject_peer_valid = true;
-            s_reject_until_us = esp_timer_get_time() + BLE_REJECT_SAME_PEER_HOLDOFF_US;
-        }
+        // own Bluetooth settings) - ble_pair_slots_on_disconnect() uses
+        // this to decide whether to keep chasing the same peer (an
+        // involuntary drop - out of range, etc. - should auto-reconnect)
+        // or go idle and wait for an explicit ble_pair_switch()/
+        // ble_pair_new() instead (a deliberate one - see
+        // mds/usb_hid/2026-09-12_ble_multi_pair.md for why this replaced
+        // the old accept-then-reject-same-peer approach entirely: directed
+        // advertising means only the *intended* peer's link layer ever
+        // sees a connectable advertisement in the first place, so there's
+        // no rapid reconnect-attempt burst left to bounce).
+        ble_pair_slots_on_disconnect(event->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM));
 
         return 0;
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -1049,25 +1017,39 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
     }
     return 0;
 }
-esp_err_t esp_hid_ble_gap_adv_start(void)
+esp_err_t esp_hid_ble_gap_adv_start(const ble_addr_t *direct_addr)
 {
     int rc;
     struct ble_gap_adv_params adv_params;
     /* maximum possible duration for hid device(180s) */
     int32_t adv_duration_ms = 180000;
 
-    rc = ble_gap_adv_set_fields(&fields);
-    if (rc != 0) {
-        MODLOG_DFLT(ERROR, "error setting advertisement data; rc=%d\n", rc);
-        return rc;
+    // Directed advertising (ADV_DIRECT_IND) packets carry no AD payload at
+    // all (just the advertiser's and target's addresses) - setting the
+    // usual name/appearance/UUID fields doesn't apply and isn't needed, so
+    // skip it in that case (ble_gap_adv_set_fields() would have nothing
+    // meaningful to do anyway - untested whether NimBLE errors on it, not
+    // worth relying on either way).
+    if (direct_addr == NULL) {
+        rc = ble_gap_adv_set_fields(&fields);
+        if (rc != 0) {
+            MODLOG_DFLT(ERROR, "error setting advertisement data; rc=%d\n", rc);
+            return rc;
+        }
     }
     /* Begin advertising. */
     memset(&adv_params, 0, sizeof adv_params);
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    // BLE_GAP_CONN_MODE_DIR (low duty cycle - high_duty_cycle defaults to
+    // 0 above) when direct_addr is given: see esp_hid_ble_gap_adv_start()'s
+    // own doc comment (esp_hid_gap.h) for what this buys - only direct_addr
+    // can even connect, at the link layer, no application-level
+    // accept-then-reject needed. BLE_GAP_CONN_MODE_UND (the only mode this
+    // ever had before) otherwise - anyone can connect.
+    adv_params.conn_mode = direct_addr != NULL ? BLE_GAP_CONN_MODE_DIR : BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
     adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(30);/* Recommended interval 30ms to 50ms */
     adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(50);
-    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, adv_duration_ms,
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, direct_addr, adv_duration_ms,
                            &adv_params, nimble_hid_gap_event, NULL);
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", rc);
