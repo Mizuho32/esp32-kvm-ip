@@ -106,22 +106,21 @@ sink :typec_cc,    :typec, kind: :consumer
 # stack at boot (its permanent RAM cost + WiFi-coexistence radio
 # contention - see ble_wifi_off_while_connected above - then never
 # happens unless actually turned on). The script must then call
-# `ble_enable(true)`/`ble_enable(false)` itself, typically from a
-# :keyboard pipeline's to()/branch() block watching for some chosen combo.
-# ble_enable itself has no "is it currently on" query, so a toggle needs
-# the script to track that on its own - a Hash the block closes over
-# (mutated, not reassigned - safest across repeated block invocations)
-# works well (adjust the combo to taste - this example is left-Ctrl+
-# left-Alt+B, modifiers bit0|bit2 = 0x05, keycode 0x05 = B):
+# `ble_enable` itself, typically from a :keyboard pipeline's
+# to()/branch() block watching for some chosen combo. `ble_enable` with
+# no argument toggles based on whether the stack is actually running
+# right now - no need for the script to track its own on/off guess
+# (adjust the combo to taste - this example is left-Ctrl+left-Alt+B,
+# modifiers bit0|bit2 = 0x05, keycode 0x05 = B). `ble_enable(true)`/
+# `ble_enable(false)` are also available if you want an explicit
+# set-not-toggle instead.
 # ble_dynamic true
-# ble_state = { enabled: false }
 #
 # pipeline :keyboard do
 #   from :local_kbd
 #   to(:typec_kbd) { |ev|
 #     if ev[:modifiers] & 0x05 == 0x05 && ev[:keycodes].include?(0x05)
-#       ble_state[:enabled] = !ble_state[:enabled]
-#       ble_enable ble_state[:enabled]
+#       ble_enable
 #       next nil
 #     end
 #     ev

@@ -970,28 +970,39 @@ static mrb_value ruby_ble_dynamic(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
-// `ble_enable(true)`/`ble_enable(false)` - starts/stops the BLE HID
-// stack right now (ble_hid_device_start()/_stop()), unlike
+// `ble_enable(true)`/`ble_enable(false)`/`ble_enable()` - starts/stops
+// the BLE HID stack right now (ble_hid_device_start()/_stop()), unlike
 // ble_dynamic/sink() above which only ever take effect at boot. Meant to
 // be called from anywhere at runtime, typically a :keyboard pipeline's
 // to()/branch() block reacting to some chosen key combo - see
 // mds/usb_hid/2026-09-11_ble_dynamic_enable.md's motivating use case
 // (BLE off by default to avoid its permanent RAM/WiFi-coexistence cost,
-// turned on only while actually wanted). Both directions are idempotent
-// (already-started/-stopped is a harmless no-op) and BLOCK the calling
-// task for roughly as long as the underlying stack takes to actually
-// start/stop - not instantaneous like every other DSL call in this file.
-// Since this typically runs from inside mruby's dispatch path
-// (s_mrb_mutex held - see mruby_dispatch_keyboard()), that means every
-// *other* pipeline (mouse included) stalls for the same duration - an
-// accepted, documented tradeoff for a deliberate, infrequent action, not
-// a hot-path concern (mirrors system_control()'s own
-// SYSTEM_CONTROL_PULSE_MS delay, just longer and less fixed).
+// turned on only while actually wanted). With no argument, toggles based
+// on ble_hid_device_started()'s *actual* current state rather than
+// requiring the script to track its own guess of it in a local variable
+// (which could drift from reality if e.g. a start ever silently failed) -
+// a plain combo-detection block can just call `ble_enable` bare. Both
+// directions are idempotent (already-started/-stopped is a harmless
+// no-op) and BLOCK the calling task for roughly as long as the
+// underlying stack takes to actually start/stop - not instantaneous like
+// every other DSL call in this file. Since this typically runs from
+// inside mruby's dispatch path (s_mrb_mutex held - see
+// mruby_dispatch_keyboard()), that means every *other* pipeline (mouse
+// included) stalls for the same duration - an accepted, documented
+// tradeoff for a deliberate, infrequent action, not a hot-path concern
+// (mirrors system_control()'s own SYSTEM_CONTROL_PULSE_MS delay, just
+// longer and less fixed).
 static mrb_value ruby_ble_enable(mrb_state *mrb, mrb_value self)
 {
     (void)self;
-    mrb_bool enabled;
-    mrb_get_args(mrb, "b", &enabled);
+    bool enabled;
+    if (mrb_get_argc(mrb) == 0) {
+        enabled = !ble_hid_device_started();
+    } else {
+        mrb_bool arg;
+        mrb_get_args(mrb, "b", &arg);
+        enabled = arg;
+    }
     esp_err_t err = enabled ? ble_hid_device_start() : ble_hid_device_stop();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "ble_enable %s: %s failed: %s", enabled ? "true" : "false",
@@ -1143,7 +1154,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "timezone", ruby_timezone, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_dynamic", ruby_ble_dynamic, MRB_ARGS_REQ(1));
-    mrb_define_method(mrb, k, "ble_enable", ruby_ble_enable, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "ble_enable", ruby_ble_enable, MRB_ARGS_OPT(1));
     mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));

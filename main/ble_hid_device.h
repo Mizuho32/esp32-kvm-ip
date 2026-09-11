@@ -78,6 +78,19 @@ esp_err_t ble_hid_device_stop(void);
  */
 bool ble_hid_device_connected(void);
 
+/**
+ * @return true while the BLE/NimBLE stack itself is up (between a
+ *         successful ble_hid_device_start() and the next
+ *         ble_hid_device_stop()) - regardless of whether a peer is
+ *         actually connected right now. Distinct from
+ *         ble_hid_device_connected() above, which additionally requires
+ *         a live connection. Exposed for mruby_filter.c's `ble_enable`
+ *         DSL call's no-argument toggle form (flips based on the real
+ *         state rather than a script-tracked guess) - see
+ *         mds/usb_hid/2026-09-11_ble_dynamic_enable.md's follow-up.
+ */
+bool ble_hid_device_started(void);
+
 /** Sends a keyboard report (Report ID 1). No-op if not connected. */
 void ble_hid_device_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]);
 

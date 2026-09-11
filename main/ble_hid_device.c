@@ -526,6 +526,11 @@ bool ble_hid_device_connected(void)
     return s_started && s_connected;
 }
 
+bool ble_hid_device_started(void)
+{
+    return s_started;
+}
+
 void ble_hid_device_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6])
 {
     if (!ble_hid_device_connected()) {
