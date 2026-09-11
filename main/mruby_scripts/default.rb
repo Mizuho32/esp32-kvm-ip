@@ -113,7 +113,10 @@ sink :typec_cc,    :typec, kind: :consumer
 # (adjust the combo to taste - this example is left-Ctrl+left-Alt+B,
 # modifiers bit0|bit2 = 0x05, keycode 0x05 = B). `ble_toggle(true)`/
 # `ble_toggle(false)` are also available if you want an explicit
-# set-not-toggle instead.
+# set-not-toggle instead. `ble_started?`/`ble_connected?` read the
+# current state back (stack up vs. stack up *and* a peer actually
+# connected, respectively) - handy for e.g. a debug_print() showing
+# what just happened:
 # ble_dynamic true
 #
 # pipeline :keyboard do
@@ -121,6 +124,7 @@ sink :typec_cc,    :typec, kind: :consumer
 #   to(:typec_kbd) { |ev|
 #     if ev[:modifiers] & 0x05 == 0x05 && ev[:keycodes].include?(0x05)
 #       ble_toggle
+#       debug_print "BLE now #{ble_started? ? 'on' : 'off'}"
 #       next nil
 #     end
 #     ev

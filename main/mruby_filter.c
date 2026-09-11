@@ -1011,6 +1011,27 @@ static mrb_value ruby_ble_toggle(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `ble_started?`/`ble_connected?` - read-only counterparts to
+// `ble_toggle` above (mirroring ble_hid_device_started()/_connected()
+// directly - see those functions' doc comments in ble_hid_device.h for
+// the distinction between "stack up" and "peer actually connected").
+// Added alongside a mismatch noticed between ble_toggle (settable) and
+// having no way for a script to actually *read* the current state back -
+// e.g. to decide whether to call `ble_toggle` at all, or just to
+// debug_print() it. See mds/usb_hid/2026-09-11_ble_dynamic_enable.md's
+// follow-up.
+static mrb_value ruby_ble_started_p(mrb_state *mrb, mrb_value self)
+{
+    (void)mrb; (void)self;
+    return mrb_bool_value(ble_hid_device_started());
+}
+
+static mrb_value ruby_ble_connected_p(mrb_state *mrb, mrb_value self)
+{
+    (void)mrb; (void)self;
+    return mrb_bool_value(ble_hid_device_connected());
+}
+
 // `debug_print_to(*syms)` - explicitly sets which destination(s)
 // debug_print() writes to, replacing the previous set entirely (same
 // "fully controlled by the script's call" convention as
@@ -1155,6 +1176,8 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_dynamic", ruby_ble_dynamic, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_toggle", ruby_ble_toggle, MRB_ARGS_OPT(1));
+    mrb_define_method(mrb, k, "ble_started?", ruby_ble_started_p, MRB_ARGS_NONE());
+    mrb_define_method(mrb, k, "ble_connected?", ruby_ble_connected_p, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));

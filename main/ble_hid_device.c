@@ -195,15 +195,17 @@ static bool s_started;
 static void ble_hid_mouse_pending_reset(void);
 
 // How long to hold off re-advertising after a *deliberate* disconnect
-// (see hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case) before
-// letting the peer reconnect again. Most OSes auto-reconnect to a
-// bonded/trusted HID device the instant they see it advertising again,
-// so re-advertising immediately after the user explicitly disconnected
-// (e.g. from the PC's own Bluetooth settings) just gets it silently
-// reconnected within moments - defeating the point of having
-// disconnected at all, and (paired with mruby_filter_ble_wifi_off_while_connected())
-// leaving no real window to use WiFi/WebUI. See
-// mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up. 30s is long
+// (see hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case) - only
+// applied at all when mruby_filter_ble_wifi_off_while_connected() is
+// enabled (see that check's own comment on why: it's this holdoff's
+// entire justification) - before letting the peer reconnect again. Some
+// OSes auto-reconnect to a bonded/trusted HID device the instant they
+// see it advertising again, so re-advertising immediately after the user
+// explicitly disconnected (e.g. from the PC's own Bluetooth settings)
+// could get it silently reconnected within moments - defeating the point
+// of having disconnected at all, and (paired with
+// ble_wifi_off_while_connected) leaving no real window to use WiFi/WebUI.
+// See mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up. 30s is long
 // enough to actually do something over WiFi, short enough that it
 // doesn't feel "stuck" if a normal reconnect was wanted instead.
 #define BLE_REDISCONNECT_HOLDOFF_US (30 * 1000 * 1000)
@@ -306,15 +308,24 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
         // PC's own Bluetooth settings), as opposed to something like 0x08
         // "Connection Timeout" (radio range/interference - an involuntary
         // drop). Re-advertising immediately after a deliberate disconnect
-        // just invites most OSes' own auto-reconnect-to-bonded-HID-device
+        // *could* invite an OS's own auto-reconnect-to-bonded-HID-device
         // policy to reconnect within moments - defeating the point of
         // having disconnected at all, and (paired with
         // ble_wifi_off_while_connected above) leaving no real window to
         // use WiFi/WebUI. See mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
-        // follow-up. Hold off in that case only - an involuntary drop
-        // still re-advertises immediately, so a real out-of-range
-        // reconnect isn't delayed.
+        // follow-up.
+        //
+        // Only hold off when ble_wifi_off_while_connected is actually
+        // enabled: that's this holdoff's *entire* justification (a WiFi
+        // window to protect), so applying it unconditionally penalized
+        // scripts that never use that feature at all - the common case
+        // of "disconnect from PC A, immediately pair PC B instead" (no
+        // WiFi-window concern whatsoever) had to wait through the same
+        // 30s for no reason. See mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md.
+        // An involuntary drop still re-advertises immediately either way,
+        // so a real out-of-range reconnect is never delayed by this.
         if (param->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM) &&
+            mruby_filter_ble_wifi_off_while_connected() &&
             s_readvertise_timer != NULL) {
             ESP_LOGI(TAG, "deliberate disconnect - holding off re-advertising for %ds",
                      (int)(BLE_REDISCONNECT_HOLDOFF_US / 1000000));
