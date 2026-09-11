@@ -28,8 +28,6 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 
-#include "esp_timer.h"
-
 #include "mruby_filter.h"
 #include "status_led.h"
 #include "wifi_manager.h"
@@ -194,38 +192,25 @@ static bool s_started;
 // disconnect.
 static void ble_hid_mouse_pending_reset(void);
 
-// How long to hold off re-advertising after a *deliberate* disconnect
-// (see hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case) - only
-// applied at all when mruby_filter_ble_wifi_off_while_connected() is
-// enabled (see that check's own comment on why: it's this holdoff's
-// entire justification) - before letting the peer reconnect again. Some
-// OSes auto-reconnect to a bonded/trusted HID device the instant they
-// see it advertising again, so re-advertising immediately after the user
-// explicitly disconnected (e.g. from the PC's own Bluetooth settings)
-// could get it silently reconnected within moments - defeating the point
-// of having disconnected at all, and (paired with
-// ble_wifi_off_while_connected) leaving no real window to use WiFi/WebUI.
-// See mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's follow-up. 30s is long
-// enough to actually do something over WiFi, short enough that it
-// doesn't feel "stuck" if a normal reconnect was wanted instead.
-#define BLE_REDISCONNECT_HOLDOFF_US (30 * 1000 * 1000)
-
-// Both created once, on the first ever ble_hid_device_start(), and kept
-// forever (never esp_timer_delete()'d / vSemaphoreDelete()'d) - mirrors
-// debug_stream.c's immortal-queue design (mds/usb_hid/2026-09-10_mruby_debug_stream.md):
-// small, fixed-cost primitives that are simplest left alone, with only
-// the actual heavy BLE/NimBLE stack itself toggled by
+// Re-advertising after a *deliberate* disconnect (see
+// hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case) used to be
+// held off for a blanket 30s whenever mruby_filter_ble_wifi_off_while_connected()
+// was enabled - replaced (mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md's
+// follow-up) by esp_hid_gap.c's own peer-address-based rejection: that
+// file remembers *which* peer just deliberately disconnected and bounces
+// only *that* peer's next reconnect attempt for a while, so re-advertising
+// can (and now does) resume immediately here - a *different* device can
+// pair right away, matching how ordinary BLE peripherals (earbuds, mice)
+// behave, while the peer that was just told to go away still can't
+// silently reconnect for a while.
+//
+// Created once, on the first ever ble_hid_device_start(), and kept
+// forever (never vSemaphoreDelete()'d) - mirrors debug_stream.c's
+// immortal-queue design (mds/usb_hid/2026-09-10_mruby_debug_stream.md):
+// a small, fixed-cost primitive simplest left alone, with only the
+// actual heavy BLE/NimBLE stack itself toggled by
 // ble_hid_device_start()/_stop() (mds/usb_hid/2026-09-11_ble_dynamic_enable.md).
-static esp_timer_handle_t s_readvertise_timer;
 static SemaphoreHandle_t s_nimble_host_stopped_sem;
-
-static void readvertise_timer_cb(void *arg)
-{
-    (void)arg;
-    ESP_LOGI(TAG, "resuming advertising after deliberate-disconnect holdoff");
-    esp_hid_ble_gap_adv_start();
-    status_led_set_ble_advertising(true);
-}
 
 // ═══════════════════════════════════════════════════════════════════
 //  HID device event callback
@@ -300,47 +285,17 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
             }
         }
 
-        // NimBLE reports HCI status/reason codes as
-        // BLE_HS_ERR_HCI_BASE(0x200) + the raw HCI error (see ble_hs.h) -
-        // 0x13 (BLE_ERR_REM_USER_CONN_TERM, "Remote User Terminated
-        // Connection") is what either side's Bluetooth stack sends for a
-        // *deliberate* disconnect (e.g. the user disconnecting from the
-        // PC's own Bluetooth settings), as opposed to something like 0x08
-        // "Connection Timeout" (radio range/interference - an involuntary
-        // drop). Re-advertising immediately after a deliberate disconnect
-        // *could* invite an OS's own auto-reconnect-to-bonded-HID-device
-        // policy to reconnect within moments - defeating the point of
-        // having disconnected at all, and (paired with
-        // ble_wifi_off_while_connected above) leaving no real window to
-        // use WiFi/WebUI. See mds/usb_hid/2026-09-07_ble_hid_sink_impl.md's
-        // follow-up.
-        //
-        // Only hold off when ble_wifi_off_while_connected is actually
-        // enabled: that's this holdoff's *entire* justification (a WiFi
-        // window to protect), so applying it unconditionally penalized
-        // scripts that never use that feature at all - the common case
-        // of "disconnect from PC A, immediately pair PC B instead" (no
-        // WiFi-window concern whatsoever) had to wait through the same
-        // 30s for no reason. See mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md.
-        // An involuntary drop still re-advertises immediately either way,
-        // so a real out-of-range reconnect is never delayed by this.
-        if (param->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM) &&
-            mruby_filter_ble_wifi_off_while_connected() &&
-            s_readvertise_timer != NULL) {
-            ESP_LOGI(TAG, "deliberate disconnect - holding off re-advertising for %ds",
-                     (int)(BLE_REDISCONNECT_HOLDOFF_US / 1000000));
-            // Not advertising during the holdoff - plain solid-on (or off,
-            // if WiFi itself isn't up) is the honest state to show; the
-            // pattern resumes from readvertise_timer_cb() once advertising
-            // actually restarts.
-            status_led_set_ble_advertising(false);
-            esp_timer_stop(s_readvertise_timer); // no-op if not already running
-            esp_timer_start_once(s_readvertise_timer, BLE_REDISCONNECT_HOLDOFF_US);
-        } else {
-            ESP_LOGI(TAG, "resuming advertising");
-            esp_hid_ble_gap_adv_start();
-            status_led_set_ble_advertising(true);
-        }
+        // Always resume advertising immediately now - esp_hid_gap.c's raw
+        // NimBLE GAP listener (nimble_hid_gap_event()) is what remembers
+        // a *deliberate* disconnect's peer address and bounces only that
+        // peer's next reconnect attempt for a while, so a *different*
+        // device can still pair right away instead of waiting through a
+        // blanket holdoff that used to apply to everyone regardless of
+        // which peer was trying to connect. See
+        // mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md's follow-up.
+        ESP_LOGI(TAG, "resuming advertising");
+        esp_hid_ble_gap_adv_start();
+        status_led_set_ble_advertising(true);
         break;
     case ESP_HIDD_STOP_EVENT:
         ESP_LOGI(TAG, "stopped");
@@ -396,22 +351,8 @@ esp_err_t ble_hid_device_start(void)
         return ESP_OK;
     }
 
-    // Created once (first ever start) and kept forever - see their
-    // declarations above for why.
-    if (s_readvertise_timer == NULL) {
-        const esp_timer_create_args_t readvertise_timer_args = {
-            .callback = readvertise_timer_cb,
-            .name = "ble_readv",
-        };
-        esp_err_t timer_ret = esp_timer_create(&readvertise_timer_args, &s_readvertise_timer);
-        if (timer_ret != ESP_OK) {
-            // Not fatal - just means a deliberate disconnect (see
-            // hidd_event_callback()) falls back to immediate re-advertising
-            // instead of holding off, same as before this feature existed.
-            ESP_LOGW(TAG, "esp_timer_create (re-advertise holdoff) failed: %s", esp_err_to_name(timer_ret));
-            s_readvertise_timer = NULL;
-        }
-    }
+    // Created once (first ever start) and kept forever - see its
+    // declaration above for why.
     if (s_nimble_host_stopped_sem == NULL) {
         s_nimble_host_stopped_sem = xSemaphoreCreateBinary();
         if (s_nimble_host_stopped_sem == NULL) {
@@ -464,29 +405,18 @@ esp_err_t ble_hid_device_start(void)
 }
 
 // Symmetric teardown of everything ble_hid_device_start() brought up,
-// short of s_readvertise_timer/s_nimble_host_stopped_sem themselves (see
-// their declaration comment - those two stay allocated forever so a
-// later ble_hid_device_start() never has to recreate them). Called by
-// mruby_filter.c's `ble_toggle false` (see
-// mds/usb_hid/2026-09-11_ble_dynamic_enable.md) - blocks its caller for
-// roughly as long as the BT controller/NimBLE host take to actually shut
-// down (not instantaneous, unlike most of this file's other calls - see
-// that doc's note on what this means for whichever dispatch task calls
-// it holding mruby_filter.c's s_mrb_mutex meanwhile).
+// short of s_nimble_host_stopped_sem itself (see its declaration comment
+// - it stays allocated forever so a later ble_hid_device_start() never
+// has to recreate it). Called by mruby_filter.c's `ble_toggle false`
+// (see mds/usb_hid/2026-09-11_ble_dynamic_enable.md) - blocks its caller
+// for roughly as long as the BT controller/NimBLE host take to actually
+// shut down (not instantaneous, unlike most of this file's other calls -
+// see that doc's note on what this means for whichever dispatch task
+// calls it holding mruby_filter.c's s_mrb_mutex meanwhile).
 esp_err_t ble_hid_device_stop(void)
 {
     if (!s_started) {
         return ESP_OK; // already stopped - idempotent, same as debug_stream_stop()
-    }
-
-    // Cancel a pending deliberate-disconnect re-advertise holdoff (if
-    // any) rather than deleting the timer - it stays alive for next time
-    // (see its declaration comment). Left pending, it would fire
-    // readvertise_timer_cb() *after* the teardown below, calling
-    // esp_hid_ble_gap_adv_start() against an already-deinitialized BT
-    // controller - undefined behavior, not just a harmless no-op.
-    if (s_readvertise_timer != NULL) {
-        esp_timer_stop(s_readvertise_timer); // no-op (ESP_ERR_INVALID_STATE, ignored) if not pending
     }
 
     // Not currently advertising is a normal case (already connected, or

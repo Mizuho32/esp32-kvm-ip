@@ -19,6 +19,8 @@
 #include <stdbool.h>
 #include <inttypes.h>
 
+#include "esp_timer.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -833,6 +835,40 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
 
 }
 
+// ── Reject only the peer that just deliberately disconnected ──────────
+// (mds/usb_hid/2026-09-11_ble_reconnect_holdoff.md)
+//
+// ble_hid_device.c used to hold off *all* re-advertising for
+// BLE_REJECT_SAME_PEER_HOLDOFF_US after any deliberate disconnect, to
+// stop that peer from silently reconnecting on its own - but that also
+// blocked a genuinely *different* device from pairing in the meantime,
+// which defeats the actual goal ("don't let the device I just
+// disconnected grab it back", not "don't let anyone connect"). Finer
+// fix: keep advertising uninterrupted, remember *which* peer (identity
+// address) just deliberately disconnected, and bounce only a reconnect
+// attempt from that exact peer for a while - any other peer connects
+// immediately, normally.
+#define BLE_REJECT_SAME_PEER_HOLDOFF_US (30 * 1000 * 1000)
+static ble_addr_t s_reject_peer_addr;
+static bool s_reject_peer_valid;
+static int64_t s_reject_until_us;
+
+// True if a deliberate disconnect (BLE_ERR_REM_USER_CONN_TERM) is what
+// just happened, and addr is the peer that's still within its reject
+// window - i.e. this exact connection attempt should be bounced.
+static bool should_reject_reconnect(const ble_addr_t *addr)
+{
+    if (!s_reject_peer_valid) {
+        return false;
+    }
+    if (esp_timer_get_time() >= s_reject_until_us) {
+        s_reject_peer_valid = false; // window expired - stop tracking, nothing left to reject
+        return false;
+    }
+    return addr->type == s_reject_peer_addr.type &&
+           memcmp(addr->val, s_reject_peer_addr.val, sizeof(addr->val)) == 0;
+}
+
 static int
 nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
 {
@@ -846,6 +882,17 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
                 event->connect.status == 0 ? "established" : "failed",
                 event->connect.status);
         if (event->connect.status == 0) {
+            // Bounce this connection immediately if it's the same peer
+            // that deliberately disconnected recently and is still
+            // within its reject window (see should_reject_reconnect()'s
+            // doc comment) - any other peer, or this same one after the
+            // window expires, falls through and connects normally below.
+            rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
+            if (rc == 0 && should_reject_reconnect(&desc.peer_id_addr)) {
+                ESP_LOGI(TAG, "rejecting reconnect from recently-deliberately-disconnected peer");
+                ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                return 0;
+            }
             // Neither this file nor esp_hid's own nimble_hidd.c ever asked
             // for a short connection interval - the only itvl_min/max
             // configured anywhere (esp_hid_ble_gap_adv_init() above) is the
@@ -881,6 +928,21 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
         break;
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
+
+        // 0x13 (BLE_ERR_REM_USER_CONN_TERM, offset by BLE_HS_ERR_HCI_BASE
+        // in the reason code NimBLE reports) means the *peer* deliberately
+        // ended the connection (e.g. the user disconnected from the PC's
+        // own Bluetooth settings) - remember its identity address so
+        // should_reject_reconnect() can bounce just that peer's next
+        // reconnect attempt for a while, without holding off advertising
+        // for anyone else. An involuntary drop (e.g. reason 0x08,
+        // "Connection Timeout" - radio range/interference) doesn't set
+        // this at all, so a real out-of-range reconnect is never delayed.
+        if (event->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM)) {
+            s_reject_peer_addr = event->disconnect.conn.peer_id_addr;
+            s_reject_peer_valid = true;
+            s_reject_until_us = esp_timer_get_time() + BLE_REJECT_SAME_PEER_HOLDOFF_US;
+        }
 
         return 0;
     case BLE_GAP_EVENT_CONN_UPDATE:
