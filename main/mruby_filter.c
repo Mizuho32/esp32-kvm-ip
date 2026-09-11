@@ -67,7 +67,18 @@ extern const uint8_t mruby_default_script_end[]   asm("_binary_default_rb_end");
 // blocks relevant to that one kind - see the design doc's "実行時の性能設計"
 // note this is meant to satisfy.
 
-#define MRB_DSL_MAX_SINKS  8
+// MRB_DSL_MAX_SINKS was 8 until a real script hit it in practice (3
+// :typec + up to 3 :ble + 2 :system_control sinks alone already reaches
+// 8 with zero room for anything else, e.g. a :udp relay sink - see
+// mds/usb_hid/2026-09-11_sink_limit_exhausted.md) - sink()/source() raise
+// "too many sinks/sources declared" once hit, which is easy to miss if a
+// script's own rescue swallows it (as happened here), silently leaving
+// every sink/pipeline declaration *after* the failing line never
+// executed. Bumped generously rather than to the exact minimum needed
+// today. Both s_sinks[]/s_sources[] below share this one constant for
+// sizing (unrelated concepts, no reason they need separate limits) -
+// each element is small, so the extra headroom costs little RAM.
+#define MRB_DSL_MAX_SINKS  16
 #define MRB_DSL_MAX_STAGES 6
 
 // PIPE_SYSTEM_CONTROL is a `sink`/kind: tag only - unlike the other three,
