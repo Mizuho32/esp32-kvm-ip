@@ -24,6 +24,41 @@
 #define NVS_NAMESPACE "blepair"
 #define NVS_KEY_ACTIVE "active"
 
+// Slot 1 advertises under this device's real (public) address, same as
+// before slots existed - untouched, so nothing already bonded to it
+// notices any difference. Slots 2+ each get their own fixed random
+// static address instead (real-hardware finding: switching slots while
+// keeping one shared address let a host still bonded to a *different*
+// slot recognize this device's directed advertisement as "the same
+// device" even though it couldn't connect to it, and try to reconnect
+// anyway, interfering with whichever slot the ad was actually meant for
+// - see mds/usb_hid/2026-09-12_ble_multi_pair.md's follow-up). Giving
+// each extra slot its own identity makes it a genuinely different,
+// unrecognized device to everyone but its own bonded peer.
+//
+// Fixed/hardcoded (not generated at runtime) so they're stable across
+// reboots without needing their own NVS storage - the bond a peer forms
+// with slot N's address only stays valid if that address never changes.
+// Static random address rules (host/ble_hs_id.h): host byte order
+// (val[0] = LSB), top two bits of the most significant byte (val[5])
+// must be '1 1' for a *static* (non-resolvable-private) address - picked
+// 0xC0 (0b11000000) here, safely satisfying that with the rest zeroed
+// out except a slot-number tiebreaker in val[0].
+static const ble_addr_t s_slot_own_addr[BLE_PAIR_SLOT_COUNT + 1] = {
+    [2] = { .type = BLE_ADDR_RANDOM, .val = { 0x02, 0x00, 0x00, 0x00, 0x00, 0xC0 } },
+    [3] = { .type = BLE_ADDR_RANDOM, .val = { 0x03, 0x00, 0x00, 0x00, 0x00, 0xC0 } },
+};
+
+// NULL for slot 1 (this device's real address) or an out-of-range slot;
+// &s_slot_own_addr[slot] for slot 2/3.
+static const ble_addr_t *own_addr_for_slot(int slot)
+{
+    if (slot < 2 || slot > BLE_PAIR_SLOT_COUNT) {
+        return NULL;
+    }
+    return &s_slot_own_addr[slot];
+}
+
 static void slot_key(int slot, char *buf, size_t buf_size)
 {
     snprintf(buf, buf_size, "slot%d", slot);
@@ -143,15 +178,17 @@ static esp_err_t activate(int slot, bool pairing)
 {
     ble_gap_adv_stop(); // BLE_HS_EALREADY-ish "wasn't advertising" is expected/harmless here
 
+    const ble_addr_t *own_addr = own_addr_for_slot(slot);
+
     esp_err_t err;
     if (pairing) {
-        err = esp_hid_ble_gap_adv_start(NULL);
+        err = esp_hid_ble_gap_adv_start(NULL, own_addr);
     } else {
         ble_addr_t addr;
         if (!load_slot_addr(slot, &addr)) {
             return ESP_ERR_NOT_FOUND;
         }
-        err = esp_hid_ble_gap_adv_start(&addr);
+        err = esp_hid_ble_gap_adv_start(&addr, own_addr);
     }
     if (err != ESP_OK) {
         return err;
@@ -311,6 +348,21 @@ void ble_pair_slots_forget_all(void)
     s_pending_slot = -1;
 }
 
+// Tried and reverted: refusing to record a peer here if it was already
+// bonded to a *different* slot (real-hardware symptom that was chasing:
+// ble_pair_new() on an empty slot opens *undirected* advertising, which
+// any device can see - including one already bonded to a different slot
+// and nearby actively trying to reconnect on its own). Reverted because
+// this cuts both ways with no way to tell which is intended from a bare
+// GAP connect event: it also permanently blocks *deliberately* re-pairing
+// a device that's already bonded to some other slot to a new one (real
+// hardware: a PC already bonded to slot 2 could then never pair to slot
+// 1 either, bounced every time with a spurious "encryption failed" -
+// mds/usb_hid/2026-09-12_after_timer_dsl.md's follow-up). Undirected
+// pairing mode being "whoever connects first, wins" is accepted as an
+// inherent limitation now - get other already-bonded devices out of
+// range (or turn their Bluetooth off) before opening a new slot for
+// pairing if this is a problem in practice.
 void ble_pair_slots_on_connect(const ble_addr_t *peer_addr)
 {
     if (s_current_slot < 0) {

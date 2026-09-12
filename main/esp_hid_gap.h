@@ -87,7 +87,23 @@ esp_err_t esp_hid_ble_gap_adv_init(uint16_t appearance, const char *device_name)
 // only that one peer's link layer will even see a connectable
 // advertisement from this device at all - see
 // mds/usb_hid/2026-09-12_ble_multi_pair.md and ble_pair_slots.h.
-esp_err_t esp_hid_ble_gap_adv_start(const ble_addr_t *direct_addr);
+//
+// own_rnd_addr NULL = advertise under this device's real (public)
+// identity, as always. Non-NULL = advertise under *this* random static
+// identity instead (ble_hs_id_set_rnd() is called here). Either way the
+// actual own_addr_type passed to the controller is one of the
+// *_RPA_*_DEFAULT variants, not the plain PUBLIC/RANDOM ones - see the
+// .c file's own comment on why. See ble_pair_slots.c's per-slot addresses and
+// mds/usb_hid/2026-09-12_ble_multi_pair.md's follow-up for why: a host
+// that's bonded to this device under its *real* address has no way to
+// tell a directed advertisement meant for a *different* bonded host
+// apart from "my own device is still around" (it can still see the
+// ADV_DIRECT_IND packet even though only the addressed peer may connect
+// to it) and may try to reconnect anyway, interfering with whichever
+// peer the advertisement was actually meant for. Giving each slot beyond
+// the first its own distinct address makes a switched-away slot's old
+// host see a completely different, unrecognized device instead.
+esp_err_t esp_hid_ble_gap_adv_start(const ble_addr_t *direct_addr, const ble_addr_t *own_rnd_addr);
 #else
 esp_err_t esp_hid_ble_gap_adv_start(void);
 #endif

@@ -28,6 +28,7 @@
 
 #if CONFIG_BT_NIMBLE_ENABLED
 #include "host/ble_hs.h"
+#include "host/ble_hs_id.h" // ble_hs_id_set_rnd() - per-slot own address, see esp_hid_ble_gap_adv_start()
 #include "nimble/nimble_port.h"
 #include "host/ble_gap.h"
 #include "host/ble_hs_adv.h"
@@ -1017,12 +1018,47 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
     }
     return 0;
 }
-esp_err_t esp_hid_ble_gap_adv_start(const ble_addr_t *direct_addr)
+esp_err_t esp_hid_ble_gap_adv_start(const ble_addr_t *direct_addr, const ble_addr_t *own_rnd_addr)
 {
     int rc;
     struct ble_gap_adv_params adv_params;
     /* maximum possible duration for hid device(180s) */
     int32_t adv_duration_ms = 180000;
+
+    // See this function's own doc comment (esp_hid_gap.h) for why: a
+    // slot beyond the first advertises under its own random static
+    // *identity* address instead of this device's real one, so a host
+    // bonded to a *different* slot has no way to recognize this
+    // advertisement as "the same device" at all (as opposed to merely
+    // being unable to connect to it, which - unlike a raw ADV_DIRECT_IND
+    // sighting - some BLE stacks apparently don't treat as a strong
+    // enough signal to stop trying).
+    //
+    // *_RPA_*_DEFAULT (not plain PUBLIC/RANDOM) either way: real-hardware
+    // finding (mds/usb_hid/2026-09-12_ble_multi_pair.md's follow-up) - a
+    // peer that itself uses LE privacy (a rotating resolvable private
+    // address - Android phones commonly do, unlike e.g. a PC's BlueZ
+    // stack) never reconnected to directed advertising built from plain
+    // BLE_OWN_ADDR_PUBLIC/RANDOM. Directed advertising targets whatever
+    // address the peer is *currently* broadcasting under, which for an
+    // RPA peer isn't its fixed bonded identity address (all we have on
+    // file) - the controller has to resolve that identity to the peer's
+    // live RPA using our own resolving list, which only happens when our
+    // *own* address mode is one of the RPA variants, not the plain ones.
+    // Already-bonded peers can resolve whichever RPA we end up
+    // broadcasting back to our real identity regardless (they hold our
+    // IRK from pairing - sm_our_key_dist below includes
+    // BLE_SM_PAIR_KEY_DIST_ID), so this doesn't change anything from
+    // *their* side.
+    uint8_t own_addr_type = BLE_OWN_ADDR_RPA_PUBLIC_DEFAULT;
+    if (own_rnd_addr != NULL) {
+        rc = ble_hs_id_set_rnd(own_rnd_addr->val);
+        if (rc != 0) {
+            MODLOG_DFLT(ERROR, "ble_hs_id_set_rnd failed; rc=%d\n", rc);
+            return rc;
+        }
+        own_addr_type = BLE_OWN_ADDR_RPA_RANDOM_DEFAULT;
+    }
 
     // Directed advertising (ADV_DIRECT_IND) packets carry no AD payload at
     // all (just the advertiser's and target's addresses) - setting the
@@ -1049,7 +1085,7 @@ esp_err_t esp_hid_ble_gap_adv_start(const ble_addr_t *direct_addr)
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
     adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(30);/* Recommended interval 30ms to 50ms */
     adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(50);
-    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, direct_addr, adv_duration_ms,
+    rc = ble_gap_adv_start(own_addr_type, direct_addr, adv_duration_ms,
                            &adv_params, nimble_hid_gap_event, NULL);
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", rc);
