@@ -6,6 +6,7 @@
 #include "nvs.h"
 
 #include "host/ble_gap.h"
+#include "host/ble_store.h"
 
 #include "ble_hid_device.h"
 #include "esp_hid_gap.h"
@@ -183,6 +184,23 @@ static esp_err_t switch_or_new(int slot, bool pairing)
         return ESP_ERR_INVALID_STATE;
     }
     if (pairing) {
+        // Forget the underlying NimBLE bond (LTK/IRK/CSRK/CCCDs -
+        // ble_store_config's own NVS-backed store, entirely separate from
+        // this file's "blepair" slot-to-address mapping) for whoever was
+        // in this slot before, not just our own record of it - otherwise
+        // this device still holds stale keys for that peer's address
+        // even though ble_pair_slot_bonded?() now (correctly) reports the
+        // slot as empty. Real-hardware symptom this was chasing: a fresh
+        // ble_pair_new() advertising but not showing up as a pairing
+        // candidate on the peer's OS - though note that's very likely the
+        // *peer's own* side still remembering the old bond too (a BLE
+        // peripheral forgetting its side doesn't make a central offer to
+        // re-pair unless the central also forgot it) - this fixes our
+        // side being clean, not that other, out-of-our-control half.
+        ble_addr_t old_addr;
+        if (load_slot_addr(slot, &old_addr)) {
+            ble_store_util_delete_peer(&old_addr);
+        }
         erase_slot_addr(slot);
     } else if (!ble_pair_slot_bonded(slot)) {
         ESP_LOGW(TAG, "slot %d has no bonded device yet - use ble_pair_new(%d) instead", slot, slot);
@@ -262,7 +280,7 @@ void ble_pair_slots_on_connect(const ble_addr_t *peer_addr)
     }
 }
 
-void ble_pair_slots_on_disconnect(bool deliberate)
+void ble_pair_slots_on_disconnect(void)
 {
     if (s_pending_slot >= 0) {
         int slot = s_pending_slot;
@@ -277,24 +295,22 @@ void ble_pair_slots_on_disconnect(bool deliberate)
         return;
     }
 
-    if (deliberate) {
-        // The peer chose to end this itself - don't chase it. Go idle:
-        // no advertising at all, to anyone, until the script explicitly
-        // calls ble_pair_switch()/ble_pair_new() again (a real keyboard
-        // combo, presumably) - see mds/usb_hid/2026-09-12_ble_multi_pair.md.
-        ESP_LOGI(TAG, "deliberate disconnect from slot %d - going idle", s_current_slot);
-        s_current_slot = -1;
-        s_pairing_mode = false;
-        ble_gap_adv_stop();
-        return;
-    }
-
-    // Involuntary drop (out of range, etc.) - keep chasing the same
-    // slot/mode automatically, same as a real BLE peripheral would.
+    // Keep chasing the same slot/mode automatically regardless of *why*
+    // this disconnected - deliberate (the peer's own Bluetooth settings)
+    // or involuntary (out of range) alike, same as an ordinary BLE
+    // peripheral would. An earlier version of this function went idle
+    // (stopped advertising to anyone) specifically on a deliberate
+    // disconnect - walked back (mds/usb_hid/2026-09-12_ble_multi_pair.md's
+    // follow-up) because it fought the actual intent once slots existed:
+    // the user wants the same PC to be able to reconnect on its own after
+    // disconnecting it, and only an explicit ble_pair_switch()/
+    // ble_pair_new() call (handled above via s_pending_slot, which
+    // *does* disconnect-and-redirect) should ever move to a different
+    // device.
     if (s_current_slot >= 0) {
         esp_err_t err = activate(s_current_slot, s_pairing_mode);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "re-advertising slot %d after an involuntary drop failed: %s",
+            ESP_LOGW(TAG, "re-advertising slot %d after disconnect failed: %s",
                      s_current_slot, esp_err_to_name(err));
         }
     }

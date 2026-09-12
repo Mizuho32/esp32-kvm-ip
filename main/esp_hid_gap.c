@@ -897,20 +897,20 @@ nimble_hid_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
 
-        // 0x13 (BLE_ERR_REM_USER_CONN_TERM, offset by BLE_HS_ERR_HCI_BASE
-        // in the reason code NimBLE reports) means the *peer* deliberately
-        // ended the connection (e.g. the user disconnected from the PC's
-        // own Bluetooth settings) - ble_pair_slots_on_disconnect() uses
-        // this to decide whether to keep chasing the same peer (an
-        // involuntary drop - out of range, etc. - should auto-reconnect)
-        // or go idle and wait for an explicit ble_pair_switch()/
-        // ble_pair_new() instead (a deliberate one - see
+        // ble_pair_slots_on_disconnect() re-advertises to the same slot's
+        // peer regardless of *why* this disconnected (deliberate - e.g.
+        // the user disconnected from the PC's own Bluetooth settings - or
+        // involuntary, out of range) - see
         // mds/usb_hid/2026-09-12_ble_multi_pair.md for why this replaced
-        // the old accept-then-reject-same-peer approach entirely: directed
+        // the old accept-then-reject-same-peer approach entirely (directed
         // advertising means only the *intended* peer's link layer ever
-        // sees a connectable advertisement in the first place, so there's
-        // no rapid reconnect-attempt burst left to bounce).
-        ble_pair_slots_on_disconnect(event->disconnect.reason == (BLE_HS_ERR_HCI_BASE + BLE_ERR_REM_USER_CONN_TERM));
+        // sees a connectable advertisement in the first place - no rapid
+        // reconnect-attempt burst left to bounce) and that doc's own
+        // follow-up for why an earlier version of this that went idle on
+        // a deliberate disconnect got walked back (fought the actual
+        // intent: let the same PC reconnect on its own, only an explicit
+        // ble_pair_switch()/ble_pair_new() should move to a different one).
+        ble_pair_slots_on_disconnect();
 
         return 0;
     case BLE_GAP_EVENT_CONN_UPDATE:

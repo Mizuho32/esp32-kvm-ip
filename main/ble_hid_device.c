@@ -554,6 +554,13 @@ esp_err_t ble_hid_device_stop(void)
     s_started = false;
     s_connected = false;
     s_host_synced = false;
+    // Whatever the LED was doing (blinking - waiting on a connection or
+    // still mid-ble_pair_new() pairing) is meaningless now that the whole
+    // stack is gone - nothing left advertising to reflect. Missing this
+    // used to leave the LED stuck blinking forever after a `ble_toggle
+    // false` called mid-advertise - real-hardware repro, see
+    // mds/usb_hid/2026-09-12_ble_multi_pair.md's follow-up.
+    status_led_set_ble_advertising(false);
     ESP_LOGI(TAG, "BLE HID device stopped");
     return ret;
 }

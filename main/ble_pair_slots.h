@@ -69,4 +69,8 @@ void ble_pair_slots_forget_all(void);
 // esp_hidd_event_data_t, which exposes neither (see that struct's own
 // fields).
 void ble_pair_slots_on_connect(const ble_addr_t *peer_addr);
-void ble_pair_slots_on_disconnect(bool deliberate);
+
+// No longer takes a "was this deliberate" flag - see the .c file's own
+// comment for why the current slot is re-advertised to regardless of
+// disconnect reason now.
+void ble_pair_slots_on_disconnect(void);
