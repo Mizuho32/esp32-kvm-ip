@@ -175,6 +175,29 @@ CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 #   in turn already works fine without raising this.
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 
+# - CCCDs (a peer's per-characteristic notify/indicate subscription state)
+#   are persisted across reboots in a *global* fixed-size table shared by
+#   every bonded peer combined (BLE_STORE_MAX_CCCDS - see
+#   ble_store_config.c's ble_store_config_write_cccd(), and note this is
+#   unrelated to CONFIG_BT_NIMBLE_MAX_BONDS above, which only caps how
+#   many *peers'* keys/identities are remembered). This device exposes 6
+#   Input Report characteristics needing a CCCD each (keyboard/mouse ×
+#   boot+report mode, Consumer Control, System Control) - one bonded peer
+#   alone is already most of the upstream default of 8. Once
+#   ble_pair_slots.c (mds/usb_hid/2026-09-12_ble_multi_pair.md) started
+#   keeping up to BLE_PAIR_SLOT_COUNT (3) bonds around simultaneously
+#   instead of clearing the store on every new pairing, that table filled
+#   up for real on real hardware: ble_store_config_write_cccd() returning
+#   BLE_HS_ESTORE_CAP mid-subscribe made the *ATT write itself* fail (its
+#   return value is what ble_gatts_clt_cfg_access() sends back to the
+#   peer as the CCCD write's result, not just a "couldn't persist this"
+#   side note) - the peer's OS gave up on that characteristic's (and
+#   apparently every later one's) notifications entirely, silently
+#   breaking all HID input. 3 slots × 6 CCCDs = 18; rounded up with
+#   headroom for a device or two re-pairing into the same slot without
+#   immediately evicting the old entry.
+CONFIG_BT_NIMBLE_MAX_CCCDS=24
+
 # - HID reports here are tiny (<=8 bytes - see ble_hid_device.h's report
 #   layouts, well under the 20-byte usable payload a bare 23-byte ATT_MTU
 #   already gives a notification) - no characteristic this device exposes
