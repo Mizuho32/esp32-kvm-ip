@@ -112,6 +112,33 @@ static bool s_pairing_mode = false;
 static int s_pending_slot = -1;
 static bool s_pending_pairing_mode = false;
 
+// Forgets the underlying NimBLE bond (LTK/IRK/CSRK/CCCDs -
+// ble_store_config's own NVS-backed store, entirely separate from this
+// file's "blepair" slot-to-address mapping) for whoever was in this slot
+// before, not just our own record of it - otherwise this device still
+// holds stale keys for that peer's address even though
+// ble_pair_slot_bonded?() now (correctly) reports the slot as empty.
+//
+// Called right before activate(slot, true) at each of its call sites
+// (not eagerly from switch_or_new() before that) so that if a peer is
+// still actively connected on this slot, it sees a normal disconnect
+// happen *before* we erase its keys, rather than us ripping out an
+// encrypted link's own security material out from under it while it's
+// still live. Whether the peer's own OS then actually offers this
+// device as a fresh pairing candidate is a separate, peer-side
+// question this can't control either way (a BLE peripheral forgetting
+// its side doesn't make a central offer to re-pair unless the central
+// also forgot it) - this only makes our own side's bookkeeping correct
+// and its timing sane.
+static void erase_old_bond(int slot)
+{
+    ble_addr_t old_addr;
+    if (load_slot_addr(slot, &old_addr)) {
+        ble_store_util_delete_peer(&old_addr);
+    }
+    erase_slot_addr(slot);
+}
+
 static esp_err_t activate(int slot, bool pairing)
 {
     ble_gap_adv_stop(); // BLE_HS_EALREADY-ish "wasn't advertising" is expected/harmless here
@@ -149,6 +176,9 @@ void ble_pair_slots_resume_on_start(void)
         int slot = s_pending_slot;
         bool pairing = s_pending_pairing_mode;
         s_pending_slot = -1;
+        if (pairing) {
+            erase_old_bond(slot);
+        }
         esp_err_t err = activate(slot, pairing);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "activating slot %d (queued before the stack was ready) failed: %s",
@@ -183,26 +213,7 @@ static esp_err_t switch_or_new(int slot, bool pairing)
         ESP_LOGW(TAG, "BLE stack not started - call ble_toggle true first");
         return ESP_ERR_INVALID_STATE;
     }
-    if (pairing) {
-        // Forget the underlying NimBLE bond (LTK/IRK/CSRK/CCCDs -
-        // ble_store_config's own NVS-backed store, entirely separate from
-        // this file's "blepair" slot-to-address mapping) for whoever was
-        // in this slot before, not just our own record of it - otherwise
-        // this device still holds stale keys for that peer's address
-        // even though ble_pair_slot_bonded?() now (correctly) reports the
-        // slot as empty. Real-hardware symptom this was chasing: a fresh
-        // ble_pair_new() advertising but not showing up as a pairing
-        // candidate on the peer's OS - though note that's very likely the
-        // *peer's own* side still remembering the old bond too (a BLE
-        // peripheral forgetting its side doesn't make a central offer to
-        // re-pair unless the central also forgot it) - this fixes our
-        // side being clean, not that other, out-of-our-control half.
-        ble_addr_t old_addr;
-        if (load_slot_addr(slot, &old_addr)) {
-            ble_store_util_delete_peer(&old_addr);
-        }
-        erase_slot_addr(slot);
-    } else if (!ble_pair_slot_bonded(slot)) {
+    if (!pairing && !ble_pair_slot_bonded(slot)) {
         ESP_LOGW(TAG, "slot %d has no bonded device yet - use ble_pair_new(%d) instead", slot, slot);
         return ESP_ERR_NOT_FOUND;
     }
@@ -229,6 +240,9 @@ static esp_err_t switch_or_new(int slot, bool pairing)
         ble_hid_device_disconnect_current();
         return ESP_OK;
     }
+    if (pairing) {
+        erase_old_bond(slot);
+    }
     return activate(slot, pairing);
 }
 
@@ -237,6 +251,36 @@ esp_err_t ble_pair_switch(int slot)
     return switch_or_new(slot, false);
 }
 
+// Two things this function tried and backed out of, both documented in
+// mds/usb_hid/2026-09-12_after_timer_dsl.md's follow-up:
+//
+// - Bouncing a reconnect from the exact peer erase_old_bond() just forgot
+//   (an "avoid this address" check in ble_pair_slots_on_connect()), meant
+//   to stop that peer's own OS from silently re-grabbing the slot before
+//   a genuinely different device gets a chance. Reverted at the user's
+//   call after testing - the underlying peer-side behavior it was
+//   chasing (a device that was *just* bonded trying to reconnect with
+//   its remembered LTK instead of re-pairing, failing encryption) turned
+//   out not to even go through this check in practice, so it added
+//   complexity without a clear win, and the simpler behavior below was
+//   judged the more tolerable one to live with.
+// - Having this function do a full ble_hid_device_stop()+start()
+//   internally (the same full BT controller/NimBLE host teardown a
+//   manual `ble_toggle false` then `true` does), since that's what
+//   real-hardware testing found actually let a fresh pairing succeed
+//   reliably. Crashed the board outright - task watchdog on IDLE0, then
+//   "assert failed: xQueueSemaphoreTake queue.c:1713 (pxQueue->uxItemSize
+//   == 0)" moments into the fresh BLE_INIT, even with a 300ms delay
+//   between stop() and start() (confirmed via log timestamps that the
+//   delay really did elapse). Reverted rather than keep guessing at
+//   bigger delays against hardware that was actively crash-looping.
+//
+// Net effect: just erase the old bond + restart undirected advertising
+// (below), same as before either of those. Known consequence: if the
+// peer was *just* bonded here moments earlier, a manual `ble_toggle
+// false` -> `true` -> `ble_pair_new()` (as separate calls, with real
+// time passing between them) remains the reliable path when a plain
+// ble_pair_new() alone doesn't get a clean pairing.
 esp_err_t ble_pair_new(int slot)
 {
     return switch_or_new(slot, true);
@@ -286,6 +330,9 @@ void ble_pair_slots_on_disconnect(void)
         int slot = s_pending_slot;
         bool pairing = s_pending_pairing_mode;
         s_pending_slot = -1;
+        if (pairing) {
+            erase_old_bond(slot);
+        }
         esp_err_t err = activate(slot, pairing);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "activating slot %d (pending switch/new) failed: %s", slot, esp_err_to_name(err));

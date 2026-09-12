@@ -40,12 +40,25 @@ void ble_pair_slots_resume_on_start(void);
 esp_err_t ble_pair_switch(int slot);
 
 // Opens slot `slot` for pairing with a brand new device: forgets whatever
-// was bonded there before and starts general/undirected advertising, same
+// was bonded there before (both this file's own slot record and the
+// underlying NimBLE bond) and starts general/undirected advertising, same
 // as before slots existed - any device can connect. Disconnects the
 // current connection first if one exists (see ble_pair_switch()'s same
 // note). Whichever peer connects next gets recorded into this slot
 // (ble_pair_slots_on_connect()). ESP_ERR_INVALID_STATE if the BLE stack
 // isn't started.
+//
+// Known limitation (mds/usb_hid/2026-09-12_after_timer_dsl.md's
+// follow-up): erasing the bond here and just restarting advertising
+// isn't always enough for a peer that was *just* bonded moments earlier
+// to complete a fresh pairing right away - it may keep trying to
+// reconnect with the LTK it remembers instead of re-pairing, failing
+// encryption. A full BLE stack bounce (`ble_toggle false` then `true`,
+// waited a real moment apart) before calling this again reliably clears
+// it. Two automatic mitigations for this were tried and both reverted
+// (see the .c file's own comment on ble_pair_new()) - a manual
+// ble_toggle false/true cycle first remains the reliable path when a
+// plain ble_pair_new() alone doesn't get a clean pairing.
 esp_err_t ble_pair_new(int slot);
 
 // -1 if idle (nothing currently active/advertised-to/connected), else the
