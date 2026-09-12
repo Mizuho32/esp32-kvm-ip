@@ -141,6 +141,23 @@ static esp_err_t activate(int slot, bool pairing)
 
 void ble_pair_slots_resume_on_start(void)
 {
+    // A ble_pair_switch()/ble_pair_new() that came in too early (stack
+    // started but not yet synced - see switch_or_new()'s own comment)
+    // takes priority over whatever slot was last persisted as active.
+    if (s_pending_slot >= 0) {
+        int slot = s_pending_slot;
+        bool pairing = s_pending_pairing_mode;
+        s_pending_slot = -1;
+        esp_err_t err = activate(slot, pairing);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "activating slot %d (queued before the stack was ready) failed: %s",
+                     slot, esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "slot %d (%s) now that the stack is ready", slot, pairing ? "pairing" : "directed advertising");
+        }
+        return;
+    }
+
     int slot = load_active_slot();
     if (slot < 0) {
         ESP_LOGI(TAG, "no previously-active slot - staying idle until ble_pair_switch/ble_pair_new is called");
@@ -170,6 +187,20 @@ static esp_err_t switch_or_new(int slot, bool pairing)
     } else if (!ble_pair_slot_bonded(slot)) {
         ESP_LOGW(TAG, "slot %d has no bonded device yet - use ble_pair_new(%d) instead", slot, slot);
         return ESP_ERR_NOT_FOUND;
+    }
+    if (!ble_hid_device_ready()) {
+        // Stack is launching but the NimBLE host hasn't finished syncing
+        // with the controller yet (real-hardware repro: `ble_toggle true`
+        // immediately followed by this, same script tick - an advertising
+        // HCI command sent this early fails outright: "ble_hs_hci_cmd_send_buf
+        // rc=22"). Queue it - ble_pair_slots_resume_on_start() (called
+        // once ESP_HIDD_START_EVENT actually fires) picks this up instead
+        // of whatever was last persisted as active.
+        s_pending_slot = slot;
+        s_pending_pairing_mode = pairing;
+        ESP_LOGI(TAG, "BLE stack not synced yet - queuing slot %d (%s) for once it's ready",
+                 slot, pairing ? "pairing" : "directed advertising");
+        return ESP_OK;
     }
     if (ble_hid_device_connected()) {
         // Can't switch out from under a live connection synchronously -

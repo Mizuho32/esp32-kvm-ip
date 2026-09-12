@@ -189,6 +189,19 @@ static esp_hidd_dev_t *s_hid_dev;
 static bool s_connected;
 static bool s_started;
 
+// True only once the NimBLE host has actually finished its sync handshake
+// with the controller (ESP_HIDD_START_EVENT, driven by
+// nimble_hidd_fork.c's nimble_host_synced() -> ble_hs_cfg.sync_cb) -
+// distinct from s_started, which flips true as soon as
+// ble_hid_device_start() finishes *launching* the stack, well before that
+// handshake completes. ble_pair_slots.c needs this distinction:
+// ble_pair_switch()/ble_pair_new() called right after `ble_toggle true`
+// (s_started already true) could still race ahead of sync and send an
+// advertising HCI command too early - real-hardware symptom, "ble_hs_hci_cmd_send_buf
+// rc=22" / "error setting advertisement data" - see
+// mds/usb_hid/2026-09-12_ble_multi_pair.md's follow-up.
+static bool s_host_synced;
+
 // Set right before ble_hid_device_stop() forces the stack down, cleared
 // again the next time ble_hid_device_start() brings it back up - tells
 // hidd_event_callback()'s ESP_HIDD_DISCONNECT_EVENT case to do nothing.
@@ -236,9 +249,11 @@ static void hidd_event_callback(void *handler_args, esp_event_base_t base, int32
     switch (event) {
     case ESP_HIDD_START_EVENT:
         ESP_LOGI(TAG, "started");
+        s_host_synced = true;
         // ble_pair_slots.c decides whether/who to advertise to (directed
-        // at whichever slot was last active, or stay idle if none ever
-        // was) - see mds/usb_hid/2026-09-12_ble_multi_pair.md.
+        // at whichever slot was last active, or a switch()/new() call
+        // that came in too early and had to wait for this - or stay idle
+        // if neither) - see mds/usb_hid/2026-09-12_ble_multi_pair.md.
         ble_pair_slots_resume_on_start();
         status_led_set_ble_advertising(ble_pair_current_slot() >= 0);
         break;
@@ -369,6 +384,8 @@ esp_err_t ble_hid_device_start(void)
     if (s_started) {
         return ESP_OK;
     }
+
+    s_host_synced = false; // flips true again once ESP_HIDD_START_EVENT actually arrives
 
     // A fresh stack is coming up - any stray disconnect event left over
     // from a previous ble_hid_device_stop() is done mattering, and this
@@ -536,6 +553,7 @@ esp_err_t ble_hid_device_stop(void)
 
     s_started = false;
     s_connected = false;
+    s_host_synced = false;
     ESP_LOGI(TAG, "BLE HID device stopped");
     return ret;
 }
@@ -548,6 +566,11 @@ bool ble_hid_device_connected(void)
 bool ble_hid_device_started(void)
 {
     return s_started;
+}
+
+bool ble_hid_device_ready(void)
+{
+    return s_started && s_host_synced;
 }
 
 void ble_hid_device_disconnect_current(void)

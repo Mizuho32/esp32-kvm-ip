@@ -91,6 +91,21 @@ bool ble_hid_device_connected(void);
  */
 bool ble_hid_device_started(void);
 
+/**
+ * @return true once ble_hid_device_started() AND the NimBLE host has
+ *         actually finished syncing with the controller (there's a real
+ *         delay between the two - ble_hid_device_start() launches the
+ *         stack asynchronously and returns immediately). Advertising
+ *         commands (esp_hid_ble_gap_adv_start()) sent before this is true
+ *         fail at the HCI layer - ble_pair_slots.c's ble_pair_switch()/
+ *         ble_pair_new() check this to know whether to act immediately or
+ *         queue the request for once ESP_HIDD_START_EVENT actually
+ *         arrives - see mds/usb_hid/2026-09-12_ble_multi_pair.md's
+ *         follow-up (real-hardware repro: `ble_toggle true` immediately
+ *         followed by `ble_pair_new` in the same script tick).
+ */
+bool ble_hid_device_ready(void);
+
 /** Sends a keyboard report (Report ID 1). No-op if not connected. */
 void ble_hid_device_keyboard_report(uint8_t modifiers, const uint8_t keycodes[6]);
 
