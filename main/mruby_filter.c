@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -81,6 +82,18 @@ extern const uint8_t mruby_default_script_end[]   asm("_binary_default_rb_end");
 // each element is small, so the extra headroom costs little RAM.
 #define MRB_DSL_MAX_SINKS  16
 #define MRB_DSL_MAX_STAGES 6
+
+// `after(ms) { ... }` (mds/usb_hid/2026-09-12_ble_multi_pair.md's
+// follow-up - a long-press-detection question, but this itself is a
+// general-purpose primitive, not long-press-specific) - a small fixed
+// pool of one-shot esp_timers, each optionally holding one pending Ruby
+// block. No cancellation API (v1) - a block that's no longer relevant by
+// the time it fires (e.g. the key it was watching got released early)
+// just needs to check whatever state it captured and no-op itself; see
+// that doc for a worked example. 4 concurrent pending timers ought to be
+// enough for a few keyboard combos in flight at once without over-sizing
+// a feature nothing has asked for more of yet.
+#define MRB_DSL_MAX_TIMERS 4
 
 // PIPE_SYSTEM_CONTROL is a `sink`/kind: tag only - unlike the other three,
 // nothing ever builds an actual s_pipelines[PIPE_SYSTEM_CONTROL]/
@@ -178,6 +191,19 @@ static mrb_state *s_mrb;
 // (this was found from a real "checksum mismatch"/heap-corruption-looking
 // regression once a script exercised both paths at once).
 static SemaphoreHandle_t s_mrb_mutex;
+
+// `after(ms) { block }`'s backing pool - see MRB_DSL_MAX_TIMERS' own
+// comment. Each esp_timer_handle_t is created once (lazily, on that
+// slot's first-ever use) and kept forever - same immortal-primitive
+// pattern used elsewhere in this project (e.g. ble_hid_device.c's
+// s_nimble_host_stopped_sem) - only in_use/block toggle per call.
+typedef struct {
+    esp_timer_handle_t handle;
+    mrb_value block;
+    bool in_use;
+} dsl_timer_slot_t;
+static dsl_timer_slot_t s_dsl_timers[MRB_DSL_MAX_TIMERS];
+
 static bool s_active;
 static char s_hostname[64];
 static bool s_hostname_set;
@@ -1211,6 +1237,111 @@ static bool check_error(void)
     return false;
 }
 
+// `after(ms) { block }`'s timer fired - runs on the esp_timer service
+// task, never the dispatch task(s) mruby_dispatch_*() run on, so this
+// takes s_mrb_mutex itself rather than assuming the caller already holds
+// it (contrast invoke_block()'s callers above, which are always already
+// inside a mruby_dispatch_*() that took it). Same MRB_TRY/MRB_CATCH +
+// check_error() protected-call shape as those, since a script bug in the
+// block is just as possible here as in any other callback.
+//
+// Real-hardware bug this fixed: because we set s_mrb->jmp = &c_jmp
+// *before* calling invoke_block(), mrb_funcall_with_block()'s own
+// internal protection (`if (!mrb->jmp) { ...catch... }` in mruby's
+// vm.c) is skipped - it only wraps itself in a jmpbuf when the caller
+// hasn't already set one. So *any* exception raised inside the block
+// (not just an escaped VM-level one) longjmps straight past
+// invoke_block() to our own MRB_CATCH here, exactly like the other
+// mruby_dispatch_*() sites below. Those all call check_error() from
+// inside their own MRB_CATCH too, precisely because of this - this one
+// originally didn't, so it left s_mrb->exc set on the shared mrb_state
+// after *any* raise in an after() block (a plain `return` inside the
+// block is a common one: it raises E_LOCALJUMP_ERROR, since the block's
+// enclosing method frame is long gone by the time this timer fires).
+// Every subsequent mruby_dispatch_*() call thereafter re-observed that
+// same stale exc (mruby's vm.c re-raises if mrb->exc is already set
+// going into a cfunc call) - i.e. one bad after() block permanently
+// wedged the whole script engine until reboot. check_error() here
+// (like the sibling sites) logs+clears it so only this one callback's
+// invocation is lost.
+static void dsl_after_timer_cb(void *arg)
+{
+    dsl_timer_slot_t *slot = (dsl_timer_slot_t *)arg;
+
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+
+    int ai = mrb_gc_arena_save(s_mrb);
+    mrb_value block = slot->block;
+
+    struct mrb_jmpbuf *prev_jmp = s_mrb->jmp;
+    struct mrb_jmpbuf c_jmp;
+    MRB_TRY(&c_jmp) {
+        s_mrb->jmp = &c_jmp;
+        invoke_block(s_mrb, block, 0, NULL);
+        check_error();
+        s_mrb->jmp = prev_jmp;
+    } MRB_CATCH(&c_jmp) {
+        s_mrb->jmp = prev_jmp;
+        check_error(); // logs+clears s_mrb->exc if the escaped exception left one set
+    } MRB_END_EXC(&c_jmp);
+
+    mrb_gc_arena_restore(s_mrb, ai);
+    mrb_gc_unregister(s_mrb, block);
+    slot->block = mrb_nil_value();
+    slot->in_use = false;
+
+    xSemaphoreGive(s_mrb_mutex);
+}
+
+static mrb_value ruby_after(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_int ms;
+    mrb_value blk;
+    mrb_get_args(mrb, "i&", &ms, &blk);
+    if (mrb_nil_p(blk)) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "after: needs a block");
+    }
+    if (ms <= 0) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "after: ms must be > 0");
+    }
+
+    dsl_timer_slot_t *slot = NULL;
+    for (int i = 0; i < MRB_DSL_MAX_TIMERS; i++) {
+        if (!s_dsl_timers[i].in_use) {
+            slot = &s_dsl_timers[i];
+            break;
+        }
+    }
+    if (slot == NULL) {
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "after: too many pending timers already (max %d)", MRB_DSL_MAX_TIMERS);
+    }
+
+    if (slot->handle == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = dsl_after_timer_cb,
+            .arg = slot,
+            .name = "mrb_after",
+        };
+        esp_err_t err = esp_timer_create(&timer_args, &slot->handle);
+        if (err != ESP_OK) {
+            mrb_raisef(mrb, E_ARGUMENT_ERROR, "after: esp_timer_create failed: %s", esp_err_to_name(err));
+        }
+    }
+
+    mrb_gc_register(mrb, blk); // must survive until dsl_after_timer_cb() runs - see mrb_gc_unregister() there
+    slot->block = blk;
+    slot->in_use = true;
+    esp_err_t err = esp_timer_start_once(slot->handle, (uint64_t)ms * 1000);
+    if (err != ESP_OK) {
+        mrb_gc_unregister(mrb, blk);
+        slot->block = mrb_nil_value();
+        slot->in_use = false;
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "after: esp_timer_start_once failed: %s", esp_err_to_name(err));
+    }
+    return mrb_nil_value();
+}
+
 static void define_dsl_methods(mrb_state *mrb)
 {
     struct RClass *k = mrb->kernel_module;
@@ -1232,6 +1363,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "ble_pair_new", ruby_ble_pair_new, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_pair_slot", ruby_ble_pair_slot, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "ble_pair_slot_bonded?", ruby_ble_pair_slot_bonded_p, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "after", ruby_after, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
     mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
