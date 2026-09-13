@@ -25,6 +25,7 @@
 // partition, is the durable record).
 #define NVS_NAMESPACE "crash"
 #define NVS_KEY_LAST "last"
+#define NVS_KEY_COUNT "count"
 #define SUMMARY_MAX 200
 
 // Set true by crash_report_init() only when *this* boot's reset reason
@@ -71,7 +72,33 @@ static bool is_crash_like(esp_reset_reason_t r)
            r == ESP_RST_WDT || r == ESP_RST_BROWNOUT || r == ESP_RST_CPU_LOCKUP;
 }
 
-static void save_summary(const char *text)
+// Raw read of the previously-saved summary text, without the "[recurred
+// Nx]" suffix crash_report_last_text() (public API) adds - crash_report_init()
+// below needs the bare text to compare against a freshly-built one.
+static bool read_saved_summary(char *out, size_t out_size)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t len = out_size;
+    esp_err_t err = nvs_get_str(h, NVS_KEY_LAST, out, &len);
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+static uint32_t read_saved_count(void)
+{
+    nvs_handle_t h;
+    uint32_t count = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u32(h, NVS_KEY_COUNT, &count);
+        nvs_close(h);
+    }
+    return count;
+}
+
+static void save_summary(const char *text, uint32_t count)
 {
     nvs_handle_t h;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
@@ -79,6 +106,7 @@ static void save_summary(const char *text)
         return;
     }
     nvs_set_str(h, NVS_KEY_LAST, text);
+    nvs_set_u32(h, NVS_KEY_COUNT, count);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -110,15 +138,33 @@ void crash_report_init(void)
     (void)n;
 
     ESP_LOGE(TAG, "previous boot crashed - %s", summary);
-    save_summary(summary);
+
+    // Same reset reason/panic reason/task/PC as the one already on file -
+    // this is the *same* bug crashing again (most commonly a boot loop:
+    // crash -> reboot -> crash again before anyone's had a chance to fix
+    // or even see it), not a new one. Bump the repeat count instead of
+    // re-notifying every single time - a boot-looping board would
+    // otherwise flood ntfy with dozens of identical pushes. The WebUI's
+    // "Clear last crash" (crash_report_clear()) is what resets this: it
+    // erases both keys below, so the *next* occurrence - even of this
+    // exact same still-unfixed bug - is "new" again and notifies once
+    // more. That's the "mark this id resolved" mechanism, reusing the
+    // dismiss button that already existed for a different reason.
+    char prev[SUMMARY_MAX];
+    if (read_saved_summary(prev, sizeof prev) && strcmp(prev, summary) == 0) {
+        uint32_t count = read_saved_count() + 1;
+        save_summary(summary, count);
+        ESP_LOGW(TAG, "same crash as last time (seen %" PRIu32 "x since last cleared) - notification suppressed", count);
+    } else {
+        save_summary(summary, 1);
+        s_pending_notify = true;
+    }
 
     // The NVS copy above is now the durable record - free the partition
     // for the next actual crash. Harmless if there was nothing to erase
     // (is_crash_like() being true doesn't guarantee a coredump was
     // actually written, e.g. a brownout right at boot).
     esp_core_dump_image_erase();
-
-    s_pending_notify = true;
 }
 
 void crash_report_set_notify_url(const char *url, size_t len)
@@ -193,13 +239,14 @@ void crash_report_last_text(char *out, size_t out_size)
         return;
     }
     out[0] = '\0';
-    nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+    if (!read_saved_summary(out, out_size)) {
         return;
     }
-    size_t len = out_size;
-    nvs_get_str(h, NVS_KEY_LAST, out, &len);
-    nvs_close(h);
+    uint32_t count = read_saved_count();
+    if (count > 1) {
+        size_t len = strlen(out);
+        snprintf(out + len, out_size - len, " [recurred %" PRIu32 "x since last cleared]", count);
+    }
 }
 
 void crash_report_clear(void)
@@ -208,7 +255,13 @@ void crash_report_clear(void)
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
         return;
     }
+    // Erasing both, not just "last": the next crash - even an exact
+    // repeat of this same still-unfixed bug - should be treated as "new"
+    // again (re-notify once, restart the repeat count at 1) rather than
+    // silently folding into whatever count was left over from before
+    // this was cleared. See crash_report_init()'s own comment on why.
     nvs_erase_key(h, NVS_KEY_LAST);
+    nvs_erase_key(h, NVS_KEY_COUNT);
     nvs_commit(h);
     nvs_close(h);
 }

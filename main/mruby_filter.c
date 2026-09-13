@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_system.h" // esp_restart() - ruby_restart()
 #include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
@@ -972,6 +973,35 @@ static mrb_value ruby_heap_trace_dump(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `restart` - a plain, intentional reboot (esp_restart(), ESP_RST_SW on
+// the next boot). Deliberately *not* something crash_report.c's
+// is_crash_like() treats as a crash - this is the DSL-level equivalent
+// of the WebUI's own "Save & reboot"/OTA update reboots, not a fault.
+static mrb_value ruby_restart(mrb_state *mrb, mrb_value self)
+{
+    (void)mrb;
+    (void)self;
+    esp_restart(); // never returns
+    return mrb_nil_value();
+}
+
+// `simulate_crash` - deliberately abort()s to test the whole crash_report.c
+// pipeline (coredump-to-flash -> next-boot NVS summary -> WebUI/ntfy) end
+// to end without needing a real bug. abort() (not e.g. a null-pointer
+// dereference) so the "crash" is 100% intentional/controlled and always
+// reproducible, while still going through the exact same panic handler
+// and coredump-to-flash path a genuine crash would - ESP-IDF's newlib
+// abort() routes into the same panic handler as an uncaught exception,
+// landing as ESP_RST_PANIC on the next boot, same as any other panic.
+static mrb_value ruby_simulate_crash(mrb_state *mrb, mrb_value self)
+{
+    (void)mrb;
+    (void)self;
+    ESP_LOGE(TAG, "simulate_crash: intentionally aborting to test crash_report.c's pipeline");
+    abort(); // never returns
+    return mrb_nil_value();
+}
+
 // `timezone "JST-9"` - a POSIX TZ string (fixed offset - "JST-9" for
 // Japan, no DST; ESP-IDF's newlib has no zoneinfo database, so IANA names
 // like "Asia/Tokyo" don't work here, only the POSIX
@@ -1399,6 +1429,8 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "crash_notify_url", ruby_crash_notify_url, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "heap_trace_start", ruby_heap_trace_start, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "heap_trace_dump", ruby_heap_trace_dump, MRB_ARGS_NONE());
+    mrb_define_method(mrb, k, "restart", ruby_restart, MRB_ARGS_NONE());
+    mrb_define_method(mrb, k, "simulate_crash", ruby_simulate_crash, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_dynamic", ruby_ble_dynamic, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_toggle", ruby_ble_toggle, MRB_ARGS_OPT(1));
