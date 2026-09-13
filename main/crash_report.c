@@ -139,32 +139,31 @@ void crash_report_init(void)
 
     ESP_LOGE(TAG, "previous boot crashed - %s", summary);
 
-    // Same reset reason/panic reason/task/PC as the one already on file -
-    // this is the *same* bug crashing again (most commonly a boot loop:
-    // crash -> reboot -> crash again before anyone's had a chance to fix
-    // or even see it), not a new one. Bump the repeat count instead of
-    // re-notifying every single time - a boot-looping board would
-    // otherwise flood ntfy with dozens of identical pushes. The WebUI's
-    // "Clear last crash" (crash_report_clear()) is what resets this: it
-    // erases both keys below, so the *next* occurrence - even of this
-    // exact same still-unfixed bug - is "new" again and notifies once
-    // more. That's the "mark this id resolved" mechanism, reusing the
-    // dismiss button that already existed for a different reason.
+    // Every crash notifies, including a repeat of the exact same bug
+    // (a real crash is a real crash - a board stuck boot-looping on one
+    // unfixed bug is exactly the situation worth *more* pushes, not
+    // fewer). The repeat count tracked here is purely informational -
+    // "[recurred Nx since last cleared]" in the WebUI (crash_report_last_text())
+    // - so a crash loop shows up as "this keeps happening" rather than
+    // silently losing count between one notification and the next.
+    // crash_report_clear() (the WebUI's dismiss button) resets it back
+    // to 1 for whatever crash comes next.
     char prev[SUMMARY_MAX];
-    if (read_saved_summary(prev, sizeof prev) && strcmp(prev, summary) == 0) {
-        uint32_t count = read_saved_count() + 1;
-        save_summary(summary, count);
-        ESP_LOGW(TAG, "same crash as last time (seen %" PRIu32 "x since last cleared) - notification suppressed", count);
-    } else {
-        save_summary(summary, 1);
-        s_pending_notify = true;
-    }
+    uint32_t count = (read_saved_summary(prev, sizeof prev) && strcmp(prev, summary) == 0)
+                          ? read_saved_count() + 1
+                          : 1;
+    save_summary(summary, count);
+    s_pending_notify = true;
 
-    // The NVS copy above is now the durable record - free the partition
-    // for the next actual crash. Harmless if there was nothing to erase
-    // (is_crash_like() being true doesn't guarantee a coredump was
-    // actually written, e.g. a brownout right at boot).
-    esp_core_dump_image_erase();
+    // Deliberately *not* erasing the coredump partition here anymore:
+    // ESP-IDF overwrites an existing core dump with a new one by default
+    // (CONFIG_ESP_COREDUMP_FLASH_NO_OVERWRITE, which this project leaves
+    // off) - the next crash gets a clean write regardless, no manual
+    // erase needed. Leaving the raw ELF dump in place means the actual
+    // full backtrace/registers/per-task stacks are still there for a
+    // deeper offline look (idf.py coredump-info over serial) if this
+    // short summary alone isn't enough to diagnose something new -
+    // there's no cost to keeping it (fixed 128K partition either way).
 }
 
 void crash_report_set_notify_url(const char *url, size_t len)
@@ -255,11 +254,12 @@ void crash_report_clear(void)
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
         return;
     }
-    // Erasing both, not just "last": the next crash - even an exact
-    // repeat of this same still-unfixed bug - should be treated as "new"
-    // again (re-notify once, restart the repeat count at 1) rather than
-    // silently folding into whatever count was left over from before
-    // this was cleared. See crash_report_init()'s own comment on why.
+    // Erasing both, not just "last": every crash notifies regardless
+    // (crash_report_init()'s own comment), so this is purely about the
+    // WebUI's repeat display - the next crash, even an exact repeat of
+    // this same bug, starts back at count 1 instead of silently
+    // continuing whatever count was left over from before this was
+    // cleared.
     nvs_erase_key(h, NVS_KEY_LAST);
     nvs_erase_key(h, NVS_KEY_COUNT);
     nvs_commit(h);

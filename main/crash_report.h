@@ -28,31 +28,29 @@ extern "C" {
 #endif
 
 // Call once, early in app_main() - right after nvs_flash_init(), before
-// anything else touches NVS or the coredump partition. Checks
-// esp_reset_reason(): if this boot followed a panic/watchdog/brownout
-// reset *and* a valid core dump is present, saves a short summary into
-// NVS (namespace "crash", survives future clean reboots) and erases the
-// coredump partition (so the next real crash gets a clean slot - the NVS
-// copy is the durable record from here on, not the partition itself).
+// anything else touches NVS. Checks esp_reset_reason(): if this boot
+// followed a panic/watchdog/brownout reset *and* a valid core dump is
+// present, saves a short summary into NVS (namespace "crash", survives
+// future clean reboots). The coredump partition itself is left alone -
+// ESP-IDF overwrites it with the next crash automatically (see
+// crash_report.c's own comment), and keeping the raw ELF around means a
+// deeper offline look (idf.py coredump-info over serial) is still
+// possible if this short summary isn't enough.
 //
-// If the new summary is byte-identical to the one already saved (same
-// panic reason/task/PC - a boot loop crashing on the same bug over and
-// over), this bumps a repeat count instead of treating it as a new
-// crash - see crash_report_last_text()'s "[recurred Nx]" suffix - and
-// does *not* re-arm crash_report_notify_after_wifi() below, so a boot
-// loop pushes exactly one ntfy notification, not one per crash.
-// crash_report_clear() resets that: the next occurrence, even of this
-// same unfixed bug, is "new" again and notifies once more - that's the
-// "mark this crash resolved" mechanism, reusing the WebUI's existing
-// dismiss button rather than needing a separate one.
+// Every crash detected here arms crash_report_notify_after_wifi() below,
+// including an exact repeat of the same bug (same panic reason/task/PC)
+// as last time - a board stuck boot-looping on one still-unfixed bug is
+// exactly the situation worth *more* notifications, not fewer. The
+// repeat count is tracked purely for the WebUI's "[recurred Nx since
+// last cleared]" display (crash_report_last_text()) - crash_report_clear()
+// resets it back to 1 for whatever crash comes next.
 void crash_report_init(void);
 
 // Call once, right after wifi_manager_start() succeeds - registers a
 // one-shot IP_EVENT_STA_GOT_IP handler that fires the ntfy.sh push (if
 // configured - see mruby_filter.h's ble_dynamic-style opt-in, this one's
 // via the script's `crash_notify_url` DSL call) exactly once, only if
-// crash_report_init() found a *new* (not a repeat of the last-notified
-// one) crash this boot. No-op on an ordinary boot or a repeat.
+// crash_report_init() found a crash this boot. No-op on an ordinary boot.
 void crash_report_notify_after_wifi(void);
 
 // Sets the ntfy.sh (or any plain-HTTP-POST-body) URL to push a crash
@@ -72,10 +70,11 @@ void crash_report_set_notify_url(const char *url, size_t len);
 void crash_report_last_text(char *out, size_t out_size);
 
 // Clears the saved crash summary *and* its repeat count (mruby_webui.c's
-// dismiss button, POST /api/crash_clear) - see crash_report_init()'s
-// comment on why clearing, not just viewing, is what re-arms
-// notification for this same crash if it recurs. Doesn't touch the
-// coredump partition (already erased by crash_report_init() regardless).
+// dismiss button, POST /api/crash_clear) - purely cosmetic (every crash
+// notifies regardless, see crash_report_init()'s comment), this just
+// resets the "[recurred Nx]" counter back to 1 for whatever crash comes
+// next. Doesn't touch the coredump partition - see crash_report_init()'s
+// comment on why that's never erased either.
 void crash_report_clear(void);
 
 // `heap_trace_start` / `heap_trace_dump` mruby DSL commands
