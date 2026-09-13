@@ -54,13 +54,20 @@ void crash_report_init(void);
 void crash_report_notify_after_wifi(void);
 
 // Sets the ntfy.sh (or any plain-HTTP-POST-body) URL to push a crash
-// summary to - e.g. "https://ntfy.sh/my-topic". `url`/`len` mirror
-// mruby_filter.c's own ruby_hostname()/ruby_ntp_sync() string-arg
-// pattern (not necessarily NUL-terminated at exactly `len`) since,
-// like WiFi credentials/hostname, this board has no compile-time-fixed
-// notification endpoint - the script's DSL is the only source. len==0
-// disables the push (WebUI/NVS reporting still works regardless).
-void crash_report_set_notify_url(const char *url, size_t len);
+// summary to - e.g. "https://ntfy.sh/my-topic" - and an optional access
+// token ("tk_...") for a self-hosted server with access control or an
+// ntfy.sh *reserved* topic, sent as `Authorization: Bearer <token>` (the
+// same header ntfy's own docs show for `curl`). `token`/`token_len` may
+// be NULL/0 for a public/unauthenticated topic - no Authorization header
+// is sent at all in that case, not an empty one.
+//
+// `url`/`url_len`/`token`/`token_len` mirror mruby_filter.c's own
+// ruby_hostname()/ruby_ntp_sync() string-arg pattern (not necessarily
+// NUL-terminated at exactly `len`) since, like WiFi credentials/
+// hostname, this board has no compile-time-fixed notification endpoint -
+// the script's DSL is the only source. url_len==0 disables the push
+// entirely (WebUI/NVS reporting still works regardless).
+void crash_report_set_notify_url(const char *url, size_t url_len, const char *token, size_t token_len);
 
 // Renders the last saved crash summary (if any), with a trailing
 // "[recurred Nx since last cleared]" if the same crash has happened more

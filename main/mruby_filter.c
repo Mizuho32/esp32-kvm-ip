@@ -932,21 +932,29 @@ static mrb_value ruby_ntp_sync(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
-// `crash_notify_url "https://ntfy.sh/my-topic"` - see
+// `crash_notify_url "https://ntfy.sh/my-topic"` or
+// `crash_notify_url "https://ntfy.sh/my-topic", "tk_..."` - see
 // crash_report_set_notify_url()'s doc comment (crash_report.h) and
 // mds/usb_hid/2026-09-13_crash_reporting.md. Same opt-in, no-default
 // pattern as ntp_sync above - no notification is sent unless the script
-// calls this.
+// calls this. The token is itself optional (a public ntfy.sh topic
+// needs none) - defaulted to empty here rather than left uninitialized
+// since mrb_get_args() doesn't touch an omitted "|s" out-param.
 static mrb_value ruby_crash_notify_url(mrb_state *mrb, mrb_value self)
 {
     (void)self;
     const char *url;
-    mrb_int len;
-    mrb_get_args(mrb, "s", &url, &len);
-    if (len < 0) {
-        len = 0;
+    mrb_int url_len;
+    const char *token = NULL;
+    mrb_int token_len = 0;
+    mrb_get_args(mrb, "s|s", &url, &url_len, &token, &token_len);
+    if (url_len < 0) {
+        url_len = 0;
     }
-    crash_report_set_notify_url(url, (size_t)len);
+    if (token_len < 0) {
+        token_len = 0;
+    }
+    crash_report_set_notify_url(url, (size_t)url_len, token, (size_t)token_len);
     return mrb_nil_value();
 }
 
@@ -1426,7 +1434,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "wifi_fast_reconnect_static_ip", ruby_wifi_fast_reconnect_static_ip, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ntp_sync", ruby_ntp_sync, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "timezone", ruby_timezone, MRB_ARGS_REQ(1));
-    mrb_define_method(mrb, k, "crash_notify_url", ruby_crash_notify_url, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "crash_notify_url", ruby_crash_notify_url, MRB_ARGS_ARG(1, 1));
     mrb_define_method(mrb, k, "heap_trace_start", ruby_heap_trace_start, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "heap_trace_dump", ruby_heap_trace_dump, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "restart", ruby_restart, MRB_ARGS_NONE());

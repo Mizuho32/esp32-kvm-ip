@@ -35,9 +35,13 @@
 // subsequent clean reboot.
 static bool s_pending_notify;
 
-// script's `crash_notify_url "https://ntfy.sh/..."` - see
-// crash_report_set_notify_url()'s doc comment (crash_report.h).
+// script's `crash_notify_url "https://ntfy.sh/...", "tk_..."` - see
+// crash_report_set_notify_url()'s doc comment (crash_report.h). Token
+// is optional/empty for a public (unauthenticated) topic - ntfy.sh's
+// default - and required for a self-hosted server with access control
+// or an ntfy.sh *reserved* topic.
 static char s_notify_url[128];
+static char s_notify_token[128];
 static bool s_notify_url_set;
 
 static const char *reset_reason_str(esp_reset_reason_t r)
@@ -166,14 +170,20 @@ void crash_report_init(void)
     // there's no cost to keeping it (fixed 128K partition either way).
 }
 
-void crash_report_set_notify_url(const char *url, size_t len)
+static void copy_truncated(char *dst, size_t dst_size, const char *src, size_t src_len)
 {
-    if (len >= sizeof s_notify_url) {
-        len = sizeof(s_notify_url) - 1;
+    if (src_len >= dst_size) {
+        src_len = dst_size - 1;
     }
-    memcpy(s_notify_url, url, len);
-    s_notify_url[len] = '\0';
-    s_notify_url_set = len > 0;
+    memcpy(dst, src, src_len);
+    dst[src_len] = '\0';
+}
+
+void crash_report_set_notify_url(const char *url, size_t url_len, const char *token, size_t token_len)
+{
+    copy_truncated(s_notify_url, sizeof s_notify_url, url, url_len);
+    copy_truncated(s_notify_token, sizeof s_notify_token, token != NULL ? token : "", token_len);
+    s_notify_url_set = s_notify_url[0] != '\0';
 }
 
 // Runs in its own short-lived task (not the esp_event task that invoked
@@ -196,10 +206,29 @@ static void notify_task(void *arg)
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client != NULL) {
         esp_http_client_set_header(client, "Title", "Wireless USBHID crashed");
+        if (s_notify_token[0] != '\0') {
+            // ntfy access token (self-hosted server with access control,
+            // or an ntfy.sh *reserved* topic) - "tk_..." tokens go in the
+            // Authorization header, same as ntfy's own documented `curl
+            // -H "Authorization: Bearer tk_..."` usage. Left off entirely
+            // (no empty header) for a public/unauthenticated topic -
+            // ntfy.sh's default.
+            char auth[8 + sizeof s_notify_token];
+            snprintf(auth, sizeof auth, "Bearer %s", s_notify_token);
+            esp_http_client_set_header(client, "Authorization", auth);
+        }
         esp_http_client_set_post_field(client, summary, (int)strlen(summary));
         esp_err_t err = esp_http_client_perform(client);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "crash notify POST failed: %s", esp_err_to_name(err));
+        } else {
+            // esp_http_client_perform() only reflects transport-level
+            // failure - a wrong/missing token still "succeeds" here with
+            // an HTTP 401/403 the caller would otherwise never see.
+            int status = esp_http_client_get_status_code(client);
+            if (status < 200 || status >= 300) {
+                ESP_LOGW(TAG, "crash notify POST rejected: HTTP %d (check crash_notify_url's token?)", status);
+            }
         }
         esp_http_client_cleanup(client);
     }
