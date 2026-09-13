@@ -27,6 +27,7 @@
 
 #include "ble_hid_device.h"
 #include "ble_pair_slots.h"
+#include "crash_report.h"
 #include "debug_stream.h"
 #include "hid_forwarder.h"
 #include "mruby_alloc_psram.h"
@@ -930,6 +931,47 @@ static mrb_value ruby_ntp_sync(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `crash_notify_url "https://ntfy.sh/my-topic"` - see
+// crash_report_set_notify_url()'s doc comment (crash_report.h) and
+// mds/usb_hid/2026-09-13_crash_reporting.md. Same opt-in, no-default
+// pattern as ntp_sync above - no notification is sent unless the script
+// calls this.
+static mrb_value ruby_crash_notify_url(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    const char *url;
+    mrb_int len;
+    mrb_get_args(mrb, "s", &url, &len);
+    if (len < 0) {
+        len = 0;
+    }
+    crash_report_set_notify_url(url, (size_t)len);
+    return mrb_nil_value();
+}
+
+// `heap_trace_start` / `heap_trace_dump` - on-demand leak hunting, see
+// crash_report.c's own doc comment on why this exists.
+// mds/usb_hid/2026-09-13_ble_idle_crash.md's uuid16 leak (found by hours
+// of free-byte counting) is exactly the kind of bug this pins to an
+// exact call site in one shot instead.
+static mrb_value ruby_heap_trace_start(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    esp_err_t err = crash_report_heap_trace_start();
+    if (err != ESP_OK) {
+        mrb_raisef(mrb, E_RUNTIME_ERROR, "heap_trace_start: %s", esp_err_to_name(err));
+    }
+    return mrb_nil_value();
+}
+
+static mrb_value ruby_heap_trace_dump(mrb_state *mrb, mrb_value self)
+{
+    (void)mrb;
+    (void)self;
+    crash_report_heap_trace_dump();
+    return mrb_nil_value();
+}
+
 // `timezone "JST-9"` - a POSIX TZ string (fixed offset - "JST-9" for
 // Japan, no DST; ESP-IDF's newlib has no zoneinfo database, so IANA names
 // like "Asia/Tokyo" don't work here, only the POSIX
@@ -1354,6 +1396,9 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "wifi_fast_reconnect_static_ip", ruby_wifi_fast_reconnect_static_ip, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ntp_sync", ruby_ntp_sync, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "timezone", ruby_timezone, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "crash_notify_url", ruby_crash_notify_url, MRB_ARGS_REQ(1));
+    mrb_define_method(mrb, k, "heap_trace_start", ruby_heap_trace_start, MRB_ARGS_NONE());
+    mrb_define_method(mrb, k, "heap_trace_dump", ruby_heap_trace_dump, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "ble_wifi_off_while_connected", ruby_ble_wifi_off_while_connected, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_dynamic", ruby_ble_dynamic, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "ble_toggle", ruby_ble_toggle, MRB_ARGS_OPT(1));

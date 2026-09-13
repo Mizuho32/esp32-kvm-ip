@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 
 #include "ble_hid_device.h"
+#include "crash_report.h"
 #include "debug_stream.h"
 #include "mruby_filter.h"
 #include "ota_updater.h"
@@ -213,11 +214,21 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     char backlog[DEBUG_BACKLOG_LINES * DEBUG_BACKLOG_LINE_MAX];
     debug_stream_recent_backlog(backlog, sizeof(backlog));
 
-    char buf[384 + sizeof(backlog)];
+    // Last crash detected by crash_report.c (mds/usb_hid/2026-09-13_crash_reporting.md) -
+    // persists in NVS across any number of further clean reboots, unlike
+    // the coredump it was extracted from (already erased by that point),
+    // so this keeps showing up here until crash_report_clear() (this
+    // page's dismiss button, POST /api/crash_clear) or a *new* crash
+    // overwrites it.
+    char last_crash[200];
+    crash_report_last_text(last_crash, sizeof last_crash);
+
+    char buf[512 + sizeof(backlog) + sizeof(last_crash)];
     const char *hostname = mruby_filter_hostname();
     int n = snprintf(buf, sizeof(buf),
                       "mruby: %s\nhostname: %s\nfrontend: %s\nble: %s\ndebug_stream: %s (port %d)\n"
                       "firmware: %s (%s)\n"
+                      "last_crash: %s\n"
                       "debug_print backlog (this boot, oldest first):\n%s",
                       mruby_filter_active() ? "active" : "inactive (C filter_rules.h/route_rules.h fallback in effect)",
                       hostname ? hostname : "(not set by script)",
@@ -227,6 +238,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                       DEBUG_STREAM_PORT,
                       running ? running->label : "?",
                       ota_state_str,
+                      last_crash[0] ? last_crash : "(none)",
                       backlog[0] ? backlog : "(none)\n");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store"); // same reasoning as script_get_handler()
@@ -261,6 +273,17 @@ static esp_err_t ble_unpair_post_handler(httpd_req_t *req)
     ble_hid_device_unpair();
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_send(req, "Unpaired - a different PC can pair now.\n", HTTPD_RESP_USE_STRLEN);
+}
+
+// POST /api/crash_clear - dismisses status_get_handler()'s "last_crash:"
+// line (crash_report.c). Purely cosmetic - the underlying coredump
+// partition is already erased by crash_report_init() at boot regardless
+// of whether this is ever called.
+static esp_err_t crash_clear_post_handler(httpd_req_t *req)
+{
+    crash_report_clear();
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, "Cleared.\n", HTTPD_RESP_USE_STRLEN);
 }
 
 // POST /api/debug_stream/start - see debug_stream.h's doc comment for why
@@ -502,6 +525,7 @@ void mruby_webui_start(void)
     static const httpd_uri_t frontend_post = { .uri = "/api/frontend", .method = HTTP_POST, .handler = frontend_post_handler };
     static const httpd_uri_t sleep_post    = { .uri = "/api/sleep",    .method = HTTP_POST, .handler = sleep_post_handler };
     static const httpd_uri_t ble_unpair_post = { .uri = "/api/ble_unpair", .method = HTTP_POST, .handler = ble_unpair_post_handler };
+    static const httpd_uri_t crash_clear_post = { .uri = "/api/crash_clear", .method = HTTP_POST, .handler = crash_clear_post_handler };
     static const httpd_uri_t debug_stream_start_post = { .uri = "/api/debug_stream/start", .method = HTTP_POST, .handler = debug_stream_start_post_handler };
     static const httpd_uri_t debug_stream_stop_post  = { .uri = "/api/debug_stream/stop",  .method = HTTP_POST, .handler = debug_stream_stop_post_handler };
     static const httpd_uri_t firmware_post = { .uri = "/api/firmware", .method = HTTP_POST, .handler = firmware_post_handler };
@@ -512,6 +536,7 @@ void mruby_webui_start(void)
     httpd_register_uri_handler(s_server, &frontend_post);
     httpd_register_uri_handler(s_server, &sleep_post);
     httpd_register_uri_handler(s_server, &ble_unpair_post);
+    httpd_register_uri_handler(s_server, &crash_clear_post);
     httpd_register_uri_handler(s_server, &debug_stream_start_post);
     httpd_register_uri_handler(s_server, &debug_stream_stop_post);
     httpd_register_uri_handler(s_server, &firmware_post);

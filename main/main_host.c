@@ -12,6 +12,7 @@
 #include "nvs_flash.h"
 
 #include "ble_hid_device.h"
+#include "crash_report.h"
 #include "heap_monitor.h"
 #include "hid_forwarder.h"
 #include "mruby_filter.h"
@@ -114,6 +115,12 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS initialized");
 
+    // See mds/usb_hid/2026-09-13_crash_reporting.md - reads back and
+    // clears any coredump left by a crash on the *previous* boot,
+    // regardless of which #if branch below this boot takes. Needs NVS
+    // (just initialized above) but nothing else.
+    crash_report_init();
+
 #if HOST_BLE_ONLY_TEST
     // See this toggle's definition above - BLE + RP2040 bridge only,
     // nothing else. NVS is still needed (NimBLE's bond store,
@@ -165,6 +172,11 @@ void app_main(void)
         ESP_LOGE(TAG, "No WiFi credentials - upload with bin/upload_wifi_credentials.py --port ... --ssid ...");
     }
     ESP_ERROR_CHECK(wifi_manager_start(wifi_ssid, wifi_password, mruby_filter_hostname()));
+
+    // Only actually does anything if crash_report_init() above found a
+    // new crash this boot *and* the script set crash_notify_url - see
+    // that function's doc comment (crash_report.h).
+    crash_report_notify_after_wifi();
 
     mruby_filter_resolve_udp_sinks();
     mruby_filter_start_net_source();

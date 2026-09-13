@@ -245,3 +245,25 @@ CONFIG_BT_NIMBLE_HR_SERVICE=n
 # or power loss before the app confirms itself) - see
 # ota_updater.c's app_main()-time call to that function.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Crash safety net (mds/usb_hid/2026-09-13_crash_reporting.md) - see
+# main/crash_report.c. ESP_COREDUMP_ENABLE_TO_FLASH writes a full ELF
+# coredump (registers/backtrace/task list) to the `coredump` partition
+# (partitions.csv) on panic/watchdog reset; auto-selects
+# ESP_COREDUMP_DATA_FORMAT_ELF and ESP_COREDUMP_CHECKSUM_SHA256, no need
+# to set those separately. crash_report.c reads it back at the next boot
+# via esp_core_dump_get_panic_reason()/get_summary(), saves a short
+# human-readable summary into NVS (survives any number of further clean
+# reboots, unlike the coredump partition itself which gets erased right
+# after being read), and surfaces it in the WebUI + an optional ntfy.sh push.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+
+# Heap tracing (esp_heap_trace.h) - kept off by default (HEAP_TRACING_OFF)
+# normally, since even just compiling it in costs a bit of IRAM and a
+# small malloc/free CPU overhead project-wide. Turned on here so
+# mruby_filter.c's `heap_trace_start`/`heap_trace_dump` DSL commands
+# (main/crash_report.c) are available for on-demand leak hunts like
+# mds/usb_hid/2026-09-13_ble_idle_crash.md's - STANDALONE (not
+# HOST-based/JTAG) since this board is never attached to a debugger in
+# normal use.
+CONFIG_HEAP_TRACING_STANDALONE=y

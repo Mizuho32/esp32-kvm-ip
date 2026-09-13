@@ -81,3 +81,15 @@ ota_1,      app,  ota_1,   ,        3M,
 mrb_script, data, 0x50,    ,        64K,
 webui_html, data, 0x51,    ,        32K,
 wifi_cred,  data, 0x52,    ,        4K,
+#
+# coredump: ESP-IDF's built-in panic/watchdog-reset ELF core dump
+# (CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH, sdkconfig.defaults) - subtype
+# must be the literal name "coredump" (ESP-IDF's espcoredump component
+# looks it up by name, not a fixed offset). Read back and cleared at the
+# next boot by main/crash_report.c - see
+# mds/usb_hid/2026-09-13_crash_reporting.md. 128K covers this project's
+# handful of tasks comfortably (default config dumps only registers/
+# backtrace/stack per task, not the whole heap - CAPTURE_DRAM is off).
+# Fits the ~1.8MB still free in this table's declared 8MB flash region
+# (see this file's own header comment on the 8MB target).
+coredump,   data, coredump,,       128K,
