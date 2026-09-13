@@ -69,6 +69,13 @@ void crash_report_notify_after_wifi(void);
 // entirely (WebUI/NVS reporting still works regardless).
 void crash_report_set_notify_url(const char *url, size_t url_len, const char *token, size_t token_len);
 
+// `crash_notify_test` mruby DSL command - fires an ntfy.sh push right
+// now, independent of any actual crash, so the URL/token can be checked
+// without needing to actually crash (or wait for `simulate_crash` to
+// reboot and reconnect WiFi first). Returns ESP_ERR_INVALID_STATE if no
+// crash_notify_url has been set - nothing to test against.
+esp_err_t crash_report_notify_test(void);
+
 // Renders the last saved crash summary (if any), with a trailing
 // "[recurred Nx since last cleared]" if the same crash has happened more
 // than once - into `out` (NUL-terminated, truncated to fit). Empty

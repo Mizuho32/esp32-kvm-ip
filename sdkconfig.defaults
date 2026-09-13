@@ -254,8 +254,10 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # to set those separately. crash_report.c reads it back at the next boot
 # via esp_core_dump_get_panic_reason()/get_summary(), saves a short
 # human-readable summary into NVS (survives any number of further clean
-# reboots, unlike the coredump partition itself which gets erased right
-# after being read), and surfaces it in the WebUI + an optional ntfy.sh push.
+# reboots - the coredump partition itself is left alone, not erased,
+# since ESP-IDF overwrites it with the next crash by default anyway, and
+# the raw ELF is still handy for a deeper offline look), and surfaces the
+# NVS summary in the WebUI + an optional ntfy.sh push.
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 
 # Heap tracing (esp_heap_trace.h) - kept off by default (HEAP_TRACING_OFF)
@@ -267,3 +269,21 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 # HOST-based/JTAG) since this board is never attached to a debugger in
 # normal use.
 CONFIG_HEAP_TRACING_STANDALONE=y
+
+# 16 (default 10) - real-hardware finding
+# (mds/usb_hid/2026-09-13_crash_reporting.md's follow-up):
+# esp_http_client's crash_notify_test/notify_task (ntfy.sh push) failed
+# outright with "esp-tls: Failed to create socket" - not a TLS problem,
+# a plain lwIP socket() exhaustion. mruby_webui.c's httpd server alone
+# reserves 7 of the previous 10 via HTTPD_DEFAULT_CONFIG()'s
+# max_open_sockets (3 of those 7 are httpd's own fixed internal
+# overhead, per esp_http_server.h's own doc comment - only 4 are ever
+# available for actual client connections), leaving just 3 for
+# hid_forwarder.c's UDP socket, debug_stream.c's own separate httpd
+# instance, DNS/NTP lookups, and now this outbound HTTPS client all at
+# once. Raising the ceiling (a small fixed per-socket cost paid once at
+# boot, not a leak - unlike everything mds/usb_hid/2026-09-13_ble_idle_crash.md
+# chased) is simpler and cheaper than trimming the WebUI's own budget,
+# which risked making the WebUI itself flaky under concurrent tabs/the
+# debug stream's long-lived connection instead.
+CONFIG_LWIP_MAX_SOCKETS=16

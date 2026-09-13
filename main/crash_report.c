@@ -1,6 +1,7 @@
 #include "crash_report.h"
 
 #include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_core_dump.h"
@@ -186,16 +187,24 @@ void crash_report_set_notify_url(const char *url, size_t url_len, const char *to
     s_notify_url_set = s_notify_url[0] != '\0';
 }
 
+// Shared by both the real post-crash push (got_ip_handler() below) and
+// crash_report_notify_test()'s on-demand one - only the title/body
+// differ. Heap-allocated (not a static buffer) since a second call could
+// otherwise race a still-running notify_task() from the first; freed by
+// notify_task() itself once it's done with it.
+typedef struct {
+    char title[64];
+    char body[SUMMARY_MAX];
+} notify_payload_t;
+
 // Runs in its own short-lived task (not the esp_event task that invoked
-// the IP_EVENT_STA_GOT_IP handler below) since esp_http_client_perform()
+// the IP_EVENT_STA_GOT_IP handler below, nor whatever mruby DSL call
+// triggered crash_report_notify_test()) since esp_http_client_perform()
 // blocks - potentially for a couple of seconds with a TLS handshake -
-// and holding up the system event loop for that isn't worth the risk of
-// delaying every other event handler that shares it.
+// and holding up either one for that isn't worth the risk.
 static void notify_task(void *arg)
 {
-    (void)arg;
-    char summary[SUMMARY_MAX] = "";
-    crash_report_last_text(summary, sizeof summary);
+    notify_payload_t *payload = (notify_payload_t *)arg;
 
     esp_http_client_config_t config = {
         .url = s_notify_url,
@@ -205,7 +214,7 @@ static void notify_task(void *arg)
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client != NULL) {
-        esp_http_client_set_header(client, "Title", "Wireless USBHID crashed");
+        esp_http_client_set_header(client, "Title", payload->title);
         if (s_notify_token[0] != '\0') {
             // ntfy access token (self-hosted server with access control,
             // or an ntfy.sh *reserved* topic) - "tk_..." tokens go in the
@@ -217,7 +226,7 @@ static void notify_task(void *arg)
             snprintf(auth, sizeof auth, "Bearer %s", s_notify_token);
             esp_http_client_set_header(client, "Authorization", auth);
         }
-        esp_http_client_set_post_field(client, summary, (int)strlen(summary));
+        esp_http_client_set_post_field(client, payload->body, (int)strlen(payload->body));
         esp_err_t err = esp_http_client_perform(client);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "crash notify POST failed: %s", esp_err_to_name(err));
@@ -228,10 +237,13 @@ static void notify_task(void *arg)
             int status = esp_http_client_get_status_code(client);
             if (status < 200 || status >= 300) {
                 ESP_LOGW(TAG, "crash notify POST rejected: HTTP %d (check crash_notify_url's token?)", status);
+            } else {
+                ESP_LOGI(TAG, "crash notify POST sent");
             }
         }
         esp_http_client_cleanup(client);
     }
+    free(payload);
     vTaskDelete(NULL);
 }
 
@@ -245,7 +257,14 @@ static void got_ip_handler(void *arg, esp_event_base_t base, int32_t id, void *d
     // this same boot - unregister immediately so a later WiFi
     // reconnect (unrelated to any crash) doesn't re-trigger this.
     esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, got_ip_handler);
-    xTaskCreate(notify_task, "crash_notify", 4096, NULL, tskIDLE_PRIORITY + 1, NULL);
+
+    notify_payload_t *payload = malloc(sizeof(notify_payload_t));
+    if (payload == NULL) {
+        return;
+    }
+    snprintf(payload->title, sizeof payload->title, "Wireless USBHID crashed");
+    crash_report_last_text(payload->body, sizeof payload->body);
+    xTaskCreate(notify_task, "crash_notify", 4096, payload, tskIDLE_PRIORITY + 1, NULL);
 }
 
 void crash_report_notify_after_wifi(void)
@@ -259,6 +278,28 @@ void crash_report_notify_after_wifi(void)
         return;
     }
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, got_ip_handler, NULL);
+}
+
+esp_err_t crash_report_notify_test(void)
+{
+    if (!s_notify_url_set) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // Unlike got_ip_handler() above, this doesn't wait for
+    // IP_EVENT_STA_GOT_IP - `crash_notify_test` is meant to be typed/run
+    // interactively (or from a script already up and running), i.e.
+    // well after WiFi has long since connected. If it hasn't,
+    // esp_http_client_perform() below just fails with a network error
+    // like any other request would.
+    notify_payload_t *payload = malloc(sizeof(notify_payload_t));
+    if (payload == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    snprintf(payload->title, sizeof payload->title, "Wireless USBHID: test notification");
+    snprintf(payload->body, sizeof payload->body,
+             "This is a test push from crash_notify_test - crash_notify_url/token is working.");
+    xTaskCreate(notify_task, "crash_notify_test", 4096, payload, tskIDLE_PRIORITY + 1, NULL);
+    return ESP_OK;
 }
 
 void crash_report_last_text(char *out, size_t out_size)

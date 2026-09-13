@@ -958,6 +958,21 @@ static mrb_value ruby_crash_notify_url(mrb_state *mrb, mrb_value self)
     return mrb_nil_value();
 }
 
+// `crash_notify_test` - fires the ntfy.sh push right now, independent of
+// any actual crash, so `crash_notify_url`'s URL/token can be checked
+// without needing `simulate_crash` (which reboots the board and waits
+// for WiFi to reconnect - overkill just to confirm a topic/token typo).
+static mrb_value ruby_crash_notify_test(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    esp_err_t err = crash_report_notify_test();
+    if (err != ESP_OK) {
+        mrb_raisef(mrb, E_RUNTIME_ERROR, "crash_notify_test: %s (call crash_notify_url first?)",
+                   esp_err_to_name(err));
+    }
+    return mrb_nil_value();
+}
+
 // `heap_trace_start` / `heap_trace_dump` - on-demand leak hunting, see
 // crash_report.c's own doc comment on why this exists.
 // mds/usb_hid/2026-09-13_ble_idle_crash.md's uuid16 leak (found by hours
@@ -1435,6 +1450,7 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "ntp_sync", ruby_ntp_sync, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "timezone", ruby_timezone, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "crash_notify_url", ruby_crash_notify_url, MRB_ARGS_ARG(1, 1));
+    mrb_define_method(mrb, k, "crash_notify_test", ruby_crash_notify_test, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "heap_trace_start", ruby_heap_trace_start, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "heap_trace_dump", ruby_heap_trace_dump, MRB_ARGS_NONE());
     mrb_define_method(mrb, k, "restart", ruby_restart, MRB_ARGS_NONE());
