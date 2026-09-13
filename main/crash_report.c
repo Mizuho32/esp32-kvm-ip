@@ -20,14 +20,24 @@
 #define TAG "CRASH_REPORT"
 
 // Mirrors ble_pair_slots.c's NVS persistence pattern. Single key "last" -
-// a short plain-text summary, not the raw coredump (that lives briefly in
-// the `coredump` partition and is erased once read here - see this
-// module's doc comment in crash_report.h for why the NVS copy, not the
-// partition, is the durable record).
+// a short plain-text summary, not the raw coredump itself (that stays in
+// the `coredump` partition, untouched - see this module's doc comment in
+// crash_report.h for why the NVS copy, not the partition, is treated as
+// the durable *summary* record).
 #define NVS_NAMESPACE "crash"
 #define NVS_KEY_LAST "last"
 #define NVS_KEY_COUNT "count"
 #define SUMMARY_MAX 200
+
+// notify_task()'s stack - real-hardware finding: 4096 stack-overflowed
+// mid-TLS-handshake (esp_http_client + mbedtls's own crypto/x509 work
+// goes fairly deep) the very first time crash_notify_test actually ran
+// end to end. Ironic given what this whole module exists for, but also
+// a genuine live-fire test of the coredump-to-flash path itself - it
+// correctly caught and saved this crash. 8192 matches what ESP-IDF's
+// own https_request example budgets for the same esp_http_client+TLS
+// combination.
+#define NOTIFY_TASK_STACK_SIZE 8192
 
 // Set true by crash_report_init() only when *this* boot's reset reason
 // indicates a crash and a coredump was actually found - false on every
@@ -264,7 +274,7 @@ static void got_ip_handler(void *arg, esp_event_base_t base, int32_t id, void *d
     }
     snprintf(payload->title, sizeof payload->title, "Wireless USBHID crashed");
     crash_report_last_text(payload->body, sizeof payload->body);
-    xTaskCreate(notify_task, "crash_notify", 4096, payload, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(notify_task, "crash_notify", NOTIFY_TASK_STACK_SIZE, payload, tskIDLE_PRIORITY + 1, NULL);
 }
 
 void crash_report_notify_after_wifi(void)
@@ -298,7 +308,7 @@ esp_err_t crash_report_notify_test(void)
     snprintf(payload->title, sizeof payload->title, "Wireless USBHID: test notification");
     snprintf(payload->body, sizeof payload->body,
              "This is a test push from crash_notify_test - crash_notify_url/token is working.");
-    xTaskCreate(notify_task, "crash_notify_test", 4096, payload, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(notify_task, "crash_notify_test", NOTIFY_TASK_STACK_SIZE, payload, tskIDLE_PRIORITY + 1, NULL);
     return ESP_OK;
 }
 
