@@ -402,6 +402,20 @@ esp_err_t ble_hid_device_start(void)
             return ESP_ERR_NO_MEM;
         }
     }
+    // Diagnostic only (mds/usb_hid/2026-09-13_ble_idle_crash.md): a
+    // real-hardware crash (assert failed: ble_hs_init ble_hs.c:995, from
+    // ble_gattc_init() returning BLE_HS_ENOMEM) hit esp_nimble_init() a
+    // couple of ble_toggle cycles into a session left idle for ~9 hours -
+    // consistent with internal-RAM heap pressure that built up somewhere
+    // (BLE-cycle-related or not) rather than a single dramatic leak, but
+    // unconfirmed without numbers from an actual occurrence. Logging free/
+    // largest-block here on every start (and again at the end of stop()
+    // below) costs nothing and turns the next occurrence into hard
+    // evidence either way.
+    ESP_LOGI(TAG, "start: internal free=%" PRIu32 " largest block=%" PRIu32,
+             (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+
     esp_err_t ret = esp_hid_gap_init(HIDD_BLE_MODE);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "esp_hid_gap_init failed: %s", esp_err_to_name(ret));
@@ -562,6 +576,12 @@ esp_err_t ble_hid_device_stop(void)
     // mds/usb_hid/2026-09-12_ble_multi_pair.md's follow-up.
     status_led_set_ble_advertising(false);
     ESP_LOGI(TAG, "BLE HID device stopped");
+    // Paired with the entry log in ble_hid_device_start() - see that log's
+    // comment. Logged after teardown so it reflects whatever this cycle's
+    // shutdown gave back (or didn't).
+    ESP_LOGI(TAG, "stop: internal free=%" PRIu32 " largest block=%" PRIu32,
+             (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     return ret;
 }
 
