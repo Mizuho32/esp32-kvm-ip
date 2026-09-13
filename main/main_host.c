@@ -12,6 +12,7 @@
 #include "nvs_flash.h"
 
 #include "ble_hid_device.h"
+#include "heap_monitor.h"
 #include "hid_forwarder.h"
 #include "mruby_filter.h"
 #include "mruby_webui.h"
@@ -102,6 +103,7 @@ void app_main(void)
     ESP_LOGI(TAG, "ESP32-S3 KVM (Host role) starting...");
 
     status_led_init();
+    heap_monitor_init(); // see mds/usb_hid/2026-09-13_ble_idle_crash.md - diagnostic only
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

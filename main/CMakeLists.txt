@@ -36,6 +36,7 @@ if(KVM_ROLE STREQUAL "HOST")
             "mruby_alloc_psram.c"
             "debug_stream.c"
             "ota_updater.c"
+            "heap_monitor.c"
         INCLUDE_DIRS "."
         EMBED_TXTFILES
             "mruby_scripts/default.rb"
