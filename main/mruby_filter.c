@@ -728,20 +728,22 @@ static mrb_value dsl_from(mrb_state *mrb, mrb_value self)
     return mrb_nil_value(); // unreachable
 }
 
-// A PIPE_UART pipeline's events are raw byte chunks, not a fixed HID
-// report - :typec/:ble sinks have no C entry point that could carry
-// that (there's no usb_device_typec_raw_bytes_report() etc.), so unlike
-// every other kind (where any sink type is a valid target), only
-// :udp/:uart sinks make sense here. Caught at pipeline-build time
-// (to()/branch() below) rather than left to send_uart_bytes_to_sink()
-// to silently drop at runtime - same "resolve everything once at load
-// time" reasoning as this whole DSL's design.
-static void check_uart_sink_compat(mrb_state *mrb, sink_def_t *sink, const char *who)
+// branch()'s block only ever returns true/false - the sink always gets
+// the pipeline's own unmodified source event, never something the block
+// constructed. That's fine for every other kind (the source event's
+// shape always matches what the sink wants), but a PIPE_UART pipeline's
+// source event is a raw byte chunk, and :typec/:ble sinks have no C
+// entry point that could carry that (no usb_device_typec_raw_bytes_report()
+// etc.) - there's no block output that could ever fix this up, unlike
+// to() below, so this one *is* a load-time error: no runtime value
+// branch() could ever pass through would make it valid.
+static void check_uart_branch_sink_compat(mrb_state *mrb, sink_def_t *sink)
 {
     if (s_building_kind == PIPE_UART && sink->kind != SINK_UDP && sink->kind != SINK_UART) {
         mrb_raisef(mrb, E_ARGUMENT_ERROR,
-                   "%s: sink :%s can't carry a :uart pipeline's raw bytes (only :udp/:uart sinks can)",
-                   who, mrb_sym_name(mrb, sink->name));
+                   "branch: sink :%s can't carry a :uart pipeline's raw bytes unmodified (only :udp/:uart sinks can - "
+                   "use to(...) instead if you want to build a keyboard/mouse/consumer Hash for a :typec/:ble sink)",
+                   mrb_sym_name(mrb, sink->name));
     }
 }
 
@@ -768,10 +770,18 @@ static mrb_value dsl_to(mrb_state *mrb, mrb_value self)
             mrb_raise(mrb, E_ARGUMENT_ERROR, "to: too many stages in this pipeline");
         }
         sink_def_t *sink = find_sink(mrb, mrb_symbol(names[i]));
-        if (sink->event_kind_hint != -1 && sink->event_kind_hint != s_building_kind) {
+        // A PIPE_UART pipeline's `to` block is explicitly allowed to
+        // target a sink of a *different* declared kind (e.g. a
+        // `sink :typec_kbd, :typec, kind: :keyboard` reached from a
+        // :uart-sourced pipeline) - the block is expected to build a
+        // Hash shaped for that sink's own kind (dispatch_uart_via()
+        // reads sink->event_kind_hint to know which shape to expect),
+        // not to echo the raw bytes it was called with. Every other
+        // kind still gets this check as before - only PIPE_UART's `to`
+        // is meant for this kind of cross-kind reshaping.
+        if (s_building_kind != PIPE_UART && sink->event_kind_hint != -1 && sink->event_kind_hint != s_building_kind) {
             mrb_raisef(mrb, E_ARGUMENT_ERROR, "to: sink :%s was declared for a different kind", mrb_sym_name(mrb, sink->name));
         }
-        check_uart_sink_compat(mrb, sink, "to");
         p->to[p->to_count].sink  = sink;
         p->to[p->to_count].block = blk;
         p->to_count++;
@@ -797,7 +807,7 @@ static mrb_value dsl_branch(mrb_state *mrb, mrb_value self)
     if (sink->event_kind_hint != -1 && sink->event_kind_hint != s_building_kind) {
         mrb_raisef(mrb, E_ARGUMENT_ERROR, "branch: sink :%s was declared for a different kind", mrb_sym_name(mrb, sink->name));
     }
-    check_uart_sink_compat(mrb, sink, "branch");
+    check_uart_branch_sink_compat(mrb, sink);
     mrb_gc_register(mrb, blk);
     p->branch[p->branch_count].sink  = sink;
     p->branch[p->branch_count].block = blk;
@@ -1721,31 +1731,48 @@ void mruby_filter_resolve_udp_sinks(void)
     }
 }
 
-// Reserved UART ports this project already claims, checked before handing
-// any `source ..., :uart`/`sink ..., :uart` port: to uart_bridge_configure()
-// - see uart_bridge.h's doc comment. 0 is always the console
-// (CONFIG_ESP_CONSOLE_UART_NUM); 1 is usb_host_rp2040_bridge.c's
-// BRIDGE_UART_PORT, but only actually reserved if that backend is
-// (possibly among others) configured to be tried - mruby_filter_host_backend_count()/_at()
-// are already finalized by the time this runs (mruby_filter_init() fills
-// in the default backend list before returning), so this check is exact,
-// not a guess.
-static bool uart_port_reserved(int port, const char **why)
+// UART0 is always the console (CONFIG_ESP_CONSOLE_UART_NUM) - the only
+// port: rejected outright, and the only one this *can't* just be left to
+// uart_driver_install()'s own already-installed check below (see
+// uart_bridge_configure()): the console's UART, when not explicitly
+// switched over to this driver via esp_vfs_dev_uart_use_driver(), talks
+// to the hardware through a simpler polling path that never registers
+// into this driver's own bookkeeping - so uart_driver_install() could
+// easily *succeed* on the console's port while still quietly breaking
+// it. Reading CONFIG_ESP_CONSOLE_UART_NUM directly means this is never a
+// stale guess - it's whatever the console is actually configured to use.
+static bool uart_port_is_console(int port)
 {
-    if (port == CONFIG_ESP_CONSOLE_UART_NUM) {
-        *why = "the console (CONFIG_ESP_CONSOLE_UART_NUM)";
-        return true;
+    return port == CONFIG_ESP_CONSOLE_UART_NUM;
+}
+
+// Everything else (most notably usb_host_rp2040_bridge.c's UART1,
+// BRIDGE_UART_PORT, only actually claimed if that backend is configured
+// *and* its probe succeeds) is deliberately NOT pre-emptively rejected
+// here - unlike the console above, that peripheral does register through
+// this same driver's bookkeeping, so uart_driver_install() (called from
+// uart_bridge_configure() below) already gives an exact, live answer:
+// whichever side calls it first wins, the other gets a clean ESP_FAIL,
+// logged and left alone (usb_host_rp2040_bridge.c already treats a
+// failed probe as "this backend isn't available, try the next" - same
+// graceful fallback as a missing MAX3421E chip). A hardcoded port-number
+// check here would just be a second, potentially-stale copy of
+// usb_host_rp2040_bridge.c's own BRIDGE_UART_PORT #define to keep in
+// sync by hand - this only logs a heads-up, it never blocks anything.
+static void warn_if_uart_port_might_race_rp2040_bridge(int port)
+{
+    if (port != 1) { // matches usb_host_rp2040_bridge.c's BRIDGE_UART_PORT (UART_NUM_1)
+        return;
     }
-    if (port == 1) {
-        int count = mruby_filter_host_backend_count();
-        for (int i = 0; i < count; i++) {
-            if (mruby_filter_host_backend_at(i) == MRUBY_HOST_BACKEND_RP2040_BRIDGE) {
-                *why = "usb_host_rp2040_bridge.c's BRIDGE_UART_PORT (rp2040_bridge is a configured USB Host backend)";
-                return true;
-            }
+    int count = mruby_filter_host_backend_count();
+    for (int i = 0; i < count; i++) {
+        if (mruby_filter_host_backend_at(i) == MRUBY_HOST_BACKEND_RP2040_BRIDGE) {
+            ESP_LOGW(TAG, "uart bridge: port 1 is also usb_host_rp2040_bridge.c's BRIDGE_UART_PORT, and "
+                          "rp2040_bridge is a configured USB Host backend - whichever claims it first wins, "
+                          "the other just fails to start cleanly (this script's uart source/sink, or that backend)");
+            return;
         }
     }
-    return false;
 }
 
 // Configures every declared `:uart` source/sink's physical peripheral
@@ -1762,13 +1789,13 @@ void mruby_filter_resolve_uart_bridges(void)
         if (src->type != SRC_UART) {
             continue;
         }
-        const char *why;
-        if (uart_port_reserved(src->uart_port, &why)) {
-            ESP_LOGE(TAG, "source :%s: UART port %d is reserved (%s) - this source will never fire",
-                     mrb_sym_name(s_mrb, src->name), src->uart_port, why);
+        if (uart_port_is_console(src->uart_port)) {
+            ESP_LOGE(TAG, "source :%s: UART port %d is the console (CONFIG_ESP_CONSOLE_UART_NUM) - this source will never fire",
+                     mrb_sym_name(s_mrb, src->name), src->uart_port);
             continue;
         }
         if (uart_bridge_configure(src->uart_port, src->uart_rx_pin, UART_BRIDGE_PIN_UNUSED, src->uart_baud) == ESP_OK) {
+            warn_if_uart_port_might_race_rp2040_bridge(src->uart_port);
             uart_bridge_start_rx(src->uart_port);
         }
     }
@@ -1777,13 +1804,14 @@ void mruby_filter_resolve_uart_bridges(void)
         if (sink->kind != SINK_UART) {
             continue;
         }
-        const char *why;
-        if (uart_port_reserved(sink->uart_port, &why)) {
-            ESP_LOGE(TAG, "sink :%s: UART port %d is reserved (%s) - sends to it will be dropped",
-                     mrb_sym_name(s_mrb, sink->name), sink->uart_port, why);
+        if (uart_port_is_console(sink->uart_port)) {
+            ESP_LOGE(TAG, "sink :%s: UART port %d is the console (CONFIG_ESP_CONSOLE_UART_NUM) - sends to it will be dropped",
+                     mrb_sym_name(s_mrb, sink->name), sink->uart_port);
             continue;
         }
-        uart_bridge_configure(sink->uart_port, UART_BRIDGE_PIN_UNUSED, sink->uart_tx_pin, sink->uart_baud);
+        if (uart_bridge_configure(sink->uart_port, UART_BRIDGE_PIN_UNUSED, sink->uart_tx_pin, sink->uart_baud) == ESP_OK) {
+            warn_if_uart_port_might_race_rp2040_bridge(sink->uart_port);
+        }
     }
 }
 
@@ -2108,8 +2136,54 @@ static void send_uart_bytes_to_sink(sink_def_t *sink, const uint8_t *data, size_
     } else if (sink->udp_resolved) {
         hid_forwarder_send_raw_bytes_to(&sink->udp_addr, data, len);
     }
-    // :typec/:ble can't reach here - check_uart_sink_compat() rejects
-    // wiring them into a :uart pipeline at script-load time.
+    // :typec/:ble sinks never reach here - a blockless `to`/any `branch`
+    // targeting one is rejected at load time (dsl_to()/check_uart_branch_sink_compat()),
+    // and a `to` block's Hash-returning path below calls
+    // send_hash_event_to_typec_or_ble_sink() instead of this function.
+}
+
+// Lets a :uart pipeline's `to` block synthesize real keyboard/mouse/
+// consumer/system_control input for a :typec/:ble sink - e.g. decoding a
+// custom protocol arriving over UART into keystrokes. `ev` is the Hash
+// the block returned; which fields it's read for is decided by the
+// *sink's own* declared `kind:` (sink->event_kind_hint), not by this
+// pipeline's PIPE_UART kind - reuses the exact same field-reading
+// helpers (dsl_hget_int()/read_keycodes()) dispatch_keyboard_via() and
+// friends use to read a (possibly user-modified) event Hash back out.
+static void send_hash_event_to_typec_or_ble_sink(mrb_state *mrb, sink_def_t *sink, mrb_value ev)
+{
+    if (sink->event_kind_hint == -1) {
+        ESP_LOGW(TAG, "uart pipeline: sink :%s needs a `kind:` (e.g. `sink :%s, :typec, kind: :keyboard`) to be "
+                      "reachable from a :uart pipeline - can't tell what report shape to send, dropping this chunk",
+                 mrb_sym_name(mrb, sink->name), mrb_sym_name(mrb, sink->name));
+        return;
+    }
+    switch (sink->event_kind_hint) {
+    case PIPE_KEYBOARD: {
+        uint8_t modifiers = (uint8_t)dsl_hget_int(mrb, ev, "modifiers", 0);
+        uint8_t keycodes[6] = {0};
+        read_keycodes(mrb, ev, keycodes, keycodes);
+        send_keyboard_to_sink(sink, modifiers, keycodes);
+        break;
+    }
+    case PIPE_MOUSE: {
+        uint8_t buttons = (uint8_t)dsl_hget_int(mrb, ev, "buttons", 0);
+        int16_t dx       = (int16_t)dsl_hget_int(mrb, ev, "dx", 0);
+        int16_t dy       = (int16_t)dsl_hget_int(mrb, ev, "dy", 0);
+        int8_t  wheel    = (int8_t)dsl_hget_int(mrb, ev, "wheel", 0);
+        int8_t  pan      = (int8_t)dsl_hget_int(mrb, ev, "pan", 0);
+        send_mouse_to_sink(sink, buttons, dx, dy, wheel, pan);
+        break;
+    }
+    case PIPE_CONSUMER:
+        send_consumer_to_sink(sink, (uint16_t)dsl_hget_int(mrb, ev, "usage_id", 0));
+        break;
+    case PIPE_SYSTEM_CONTROL:
+        send_system_control_to_sink(sink, (uint16_t)dsl_hget_int(mrb, ev, "usage_id", 0));
+        break;
+    default:
+        break; // PIPE_UART/unreachable - sink->kind is TYPEC/BLE here, never SINK_UART
+    }
 }
 
 static void dispatch_uart_via(pipeline_t *p, const uint8_t *data, size_t len)
@@ -2126,7 +2200,17 @@ static void dispatch_uart_via(pipeline_t *p, const uint8_t *data, size_t len)
 
         for (int i = 0; i < p->to_count; i++) {
             to_stage_t *stage = &p->to[i];
+            bool byte_capable = stage->sink->kind == SINK_UDP || stage->sink->kind == SINK_UART;
             if (mrb_nil_p(stage->block)) {
+                if (!byte_capable) {
+                    // Only reachable via `to :some_typec_or_ble_sink` with
+                    // no block - raw bytes have no meaning as a HID
+                    // report, and there's no block here to build one.
+                    ESP_LOGW(TAG, "uart pipeline: `to :%s` (no block) can't carry raw bytes - needs a block that "
+                                  "returns a keyboard/mouse/consumer Hash - dropping this chunk",
+                             mrb_sym_name(s_mrb, stage->sink->name));
+                    continue;
+                }
                 send_uart_bytes_to_sink(stage->sink, data, len);
                 continue;
             }
@@ -2135,11 +2219,21 @@ static void dispatch_uart_via(pipeline_t *p, const uint8_t *data, size_t len)
             if (check_error() || mrb_nil_p(ret)) {
                 continue; // script bug or explicit drop - skip this stage's sink this chunk
             }
-            if (!mrb_string_p(ret)) {
-                ESP_LOGW(TAG, "uart pipeline: `to` block must return a String (or nil to drop) - dropping this chunk");
-                continue;
+            if (byte_capable) {
+                if (!mrb_string_p(ret)) {
+                    ESP_LOGW(TAG, "uart pipeline: `to :%s` block must return a String (or nil to drop) - dropping this chunk",
+                             mrb_sym_name(s_mrb, stage->sink->name));
+                    continue;
+                }
+                send_uart_bytes_to_sink(stage->sink, (const uint8_t *)RSTRING_PTR(ret), (size_t)RSTRING_LEN(ret));
+            } else {
+                if (!mrb_hash_p(ret)) {
+                    ESP_LOGW(TAG, "uart pipeline: `to :%s` (a :typec/:ble sink) block must return a Hash (or nil to drop) "
+                                  "- dropping this chunk", mrb_sym_name(s_mrb, stage->sink->name));
+                    continue;
+                }
+                send_hash_event_to_typec_or_ble_sink(s_mrb, stage->sink, ret);
             }
-            send_uart_bytes_to_sink(stage->sink, (const uint8_t *)RSTRING_PTR(ret), (size_t)RSTRING_LEN(ret));
         }
         for (int i = 0; i < p->branch_count; i++) {
             branch_stage_t *stage = &p->branch[i];

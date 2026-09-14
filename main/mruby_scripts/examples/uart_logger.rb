@@ -26,12 +26,18 @@ pipeline(:consumer) { from :local_cc;    to :typec_cc }
 # --- UART logger -----------------------------------------------------
 #
 # rx: is the GPIO reading the far end's TX pin (cross them, as always
-# with UART) - default port: is 2 (UART_BRIDGE_DEFAULT_PORT, uart_bridge.h),
-# the only UART controller this project doesn't already claim (UART0 =
-# console, UART1 = usb_host_rp2040_bridge.c's rp2040_bridge backend, if
-# that's in use - source(...)/sink(...) raise a clear error at resolve
-# time if a `port:` collides with either).
-source :dbg_uart, :uart, rx: 4, baud: 115200
+# with UART). port: (UART controller number) defaults to
+# UART_BRIDGE_DEFAULT_PORT (uart_bridge.h) = 2, the only one this
+# project doesn't already claim some use for - shown explicitly here
+# anyway since it's worth knowing it's there:
+#
+#   - port: 0 is always rejected (it's the console, CONFIG_ESP_CONSOLE_UART_NUM)
+#   - port: 1 *can* be used, but only warns (doesn't block) if
+#     usb_host_rp2040_bridge.c's rp2040_bridge backend is also configured -
+#     whichever of the two actually claims it first at boot wins; the
+#     other just fails to start cleanly. Pick a different port: (or drop
+#     rp2040_bridge from usb_host_backends) if you want both for real.
+source :dbg_uart, :uart, rx: 4, baud: 115200, port: 2
 
 # Edit host: to wherever you're running e.g. `nc -ul 9001` to watch the
 # log live.
@@ -43,22 +49,53 @@ pipeline :uart_logger do
 end
 
 # A `to` block on a :uart pipeline receives/returns a String (the raw
-# bytes), not a Hash like the other kinds - e.g. to tag every chunk with
-# this board's hostname before forwarding:
+# bytes) when the target is a :udp/:uart sink, not a Hash like the other
+# kinds - e.g. to tag every chunk with this board's hostname before
+# forwarding:
 #
 #   to :log_pc do |bytes|
 #     "[#{Time.now.strftime('%H:%M:%S')}] #{bytes}"
 #   end
 #
-# Returning nil drops that chunk instead of forwarding it.
+# Returning nil drops that chunk instead of forwarding it. `branch`
+# (unlike `to`) can only ever fan the *unmodified* raw bytes out to more
+# :udp/:uart sinks - its block only returns true/false, never a value -
+# so it's load-time-rejected against a :typec/:ble sink; use `to` (below)
+# for those instead.
+
+# --- Synthesizing HID input from UART bytes ---------------------------
+#
+# A `to` block CAN target a :typec/:ble sink too - return a Hash shaped
+# for that sink's own declared `kind:` instead of a String, and it's sent
+# as a real keyboard/mouse/consumer/system_control report. E.g. a
+# UART-connected macro pad that sends single ASCII digits for a few fixed
+# shortcuts:
+#
+#   HID_KEY_A = 0x04   # see hid_usage_keyboard.h for the full table
+#
+#   pipeline :uart_macropad do
+#     from :dbg_uart
+#     to :typec_kbd do |bytes|
+#       next nil unless bytes == "a"
+#       { modifiers: 0, keycodes: [HID_KEY_A, 0, 0, 0, 0, 0] }
+#     end
+#   end
+#
+# A malformed/missing Hash (wrong type, or a :typec/:ble sink declared
+# without its own `kind:`) is dropped with a logged warning, not a
+# load-time error - only the pipeline *shape* (to/branch vs. sink type)
+# is checked when the script loads; a bad value from one particular
+# chunk just costs that one chunk.
 
 # --- Bidirectional / network relay (not enabled above - for reference) -
 #
 # A `sink :x, :uart, tx: ...` writes back out to a UART TX pin - wire one
 # up alongside dbg_uart's rx: to talk to the same peripheral in both
-# directions (or a different port: entirely for a separate device):
+# directions (give it the *same* port: so they share one physical UART -
+# see uart_bridge_configure()) or a different port: entirely for a
+# separate device:
 #
-#   sink :dbg_uart_out, :uart, tx: 5, baud: 115200
+#   sink :dbg_uart_out, :uart, tx: 5, baud: 115200, port: 2
 #
 # And a `source :net_in, :udp, listen: 9002` + `from :net_in, kind: :uart`
 # pipeline relays bytes arriving over the network back out to a UART TX -
