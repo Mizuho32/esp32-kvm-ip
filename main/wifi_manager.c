@@ -468,6 +468,22 @@ esp_err_t wifi_manager_start(const char *ssid, const char *password, const char 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
+    // A real-hardware coredump (mds/usb_hid/2026-09-13_ble_idle_crash.md's
+    // InterruptWDTTimeoutCPU0 finding) caught the "wifi" tag's INFO-level
+    // "Coexist!!! Wi-Fi station would only keep waked when available" log
+    // line mid-blocking-UART-write on the wifi task at the exact moment
+    // esp_bt_controller_enable() (BLE re-enable after a long idle) was
+    // hung inside the closed-source radio init (r_lld_core_init) on CPU0
+    // long enough to trip the 300ms interrupt watchdog - this coexistence
+    // notification fires every time BT starts/stops sharing the radio, so
+    // it's directly in that timing-critical path. Blocking UART output has
+    // already been measured as a real cost elsewhere on this project (see
+    // esp_hid_gap.c's identical esp_log_level_set("NimBLE", ...) and
+    // mds/usb_hid/2026-08-24_rp2040_bridge_fps_investigation.md), so
+    // silencing it here removes one concrete, avoidable source of extra
+    // time in that window - same rationale as the NimBLE one below.
+    esp_log_level_set("wifi", ESP_LOG_WARN);
+
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(

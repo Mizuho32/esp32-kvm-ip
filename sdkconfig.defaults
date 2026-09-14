@@ -287,3 +287,24 @@ CONFIG_HEAP_TRACING_STANDALONE=y
 # which risked making the WebUI itself flaky under concurrent tabs/the
 # debug stream's long-lived connection instead.
 CONFIG_LWIP_MAX_SOCKETS=16
+
+# 800 (default 300) - real-hardware coredump
+# (mds/usb_hid/2026-09-13_ble_idle_crash.md's InterruptWDTTimeoutCPU0
+# finding): a genuine crash was caught after a long BLE-off idle followed
+# by re-enabling BLE. The crashed task's backtrace was inside the closed-
+# source BT controller's radio reset/init (r_lld_core_init <-
+# r_lld_init <- r_rwble_init <- r_rwip_reset <- btdm_controller_on_reset,
+# entered from esp_bt_controller_enable()), and the "wifi" task's
+# backtrace at the same instant showed it blocked mid-UART-write printing
+# a WiFi/BT coexistence notice - i.e. re-enabling BT while WiFi is
+# associated makes the controller do more coexistence-related setup work,
+# and that combination apparently took long enough on CPU0 to exceed the
+# interrupt watchdog's default 300ms budget even after silencing that log
+# line above (wifi_manager.c). This is vendor binary-blob code this
+# project can't directly fix, so the only two levers available are
+# removing avoidable slowness from the same window (done above) and
+# giving the legitimately-slow-but-not-actually-hung path more room
+# before the watchdog treats it as a hang - the separate task watchdog
+# (5s, CONFIG_ESP_TASK_WDT_TIMEOUT_S) is unchanged and still catches an
+# actually-stuck task at a much coarser grain.
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
