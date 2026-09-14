@@ -1,6 +1,7 @@
 #ifndef HID_FORWARDER_H
 #define HID_FORWARDER_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 #include "lwip/sockets.h"
@@ -67,5 +68,12 @@ void hid_forwarder_send_consumer_to(const struct sockaddr_in *dest, uint16_t usa
  * hid_forwarder.c's own per-report paths - see
  * mds/usb_hid/2026-09-10_system_control_sleep.md. */
 void hid_forwarder_send_system_control_to(const struct sockaddr_in *dest, uint16_t usage_id);
+
+/** Send a raw byte chunk (protocol.h's raw_bytes_packet_t, not
+ * udp_packet_t) to an arbitrary destination - used by mruby_filter.c's
+ * `sink :name, :udp` when it's the target of a `:uart`-kind pipeline
+ * (mds/usb_hid/2026-09-14_uart_bridge.md). `len` over RAW_BYTES_MAX_LEN
+ * is truncated with a warning rather than sent oversized. */
+void hid_forwarder_send_raw_bytes_to(const struct sockaddr_in *dest, const uint8_t *data, size_t len);
 
 #endif

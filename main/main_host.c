@@ -151,6 +151,11 @@ void app_main(void)
     // hostname alone) unless the loaded script set one.
     mruby_filter_init();
 
+    // No WiFi/lwIP dependency (unlike mruby_filter_resolve_udp_sinks()/
+    // _start_net_source() below) - start capturing UART RX as early as
+    // possible. See mds/usb_hid/2026-09-14_uart_bridge.md.
+    mruby_filter_resolve_uart_bridges();
+
 #if !HOST_MINIMAL_TEST
     // Does not block for an actual AP connection (unlike Device role's
     // main.c) - local USB Host -> type-c input has no WiFi dependency at

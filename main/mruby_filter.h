@@ -48,6 +48,14 @@ void mruby_dispatch_mouse(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel,
 
 void mruby_dispatch_consumer(uint16_t usage_id);
 
+// Runs a raw byte chunk through the script's :uart pipeline (mds/usb_hid/
+// 2026-09-14_uart_bridge.md's `source :x, :uart, rx: ...` DSL) - called
+// from uart_bridge.c's RX task, one call per uart_read_bytes() chunk.
+// `port` is accepted for symmetry with uart_bridge.c's other calls but
+// currently unused beyond that - see mruby_filter.c's own doc comment on
+// this function for why (every :uart source shares one pipeline bucket).
+void mruby_dispatch_uart_rx(int port, const uint8_t *data, size_t len);
+
 // The script may call `hostname "..."` at load time (see main/mruby_scripts/
 // default.rb) to set the netif hostname - this is the Host role's only
 // source of one (unlike the Device role's main.c, which gets it from the
@@ -210,6 +218,15 @@ void mruby_filter_resolve_udp_sinks(void);
 // vs. plain `from :local_mouse` for local input. See
 // mds/usb_hid/2026-08-29_mruby_phase1_impl.md.
 void mruby_filter_start_net_source(void);
+
+// Configures every declared `source :name, :uart, rx: ...`/`sink :name,
+// :uart, tx: ...`'s physical peripheral (uart_bridge.c) and starts RX
+// tasks for the ones with an rx pin - mds/usb_hid/2026-09-14_uart_bridge.md.
+// Unlike mruby_filter_resolve_udp_sinks()/_start_net_source() above, this
+// has no WiFi/lwIP dependency, so it's safe (and preferable, to start
+// capturing as early as possible) to call right after mruby_filter_init()
+// returns, before wifi_manager_init(). A no-op if mruby isn't active.
+void mruby_filter_resolve_uart_bridges(void);
 
 // Which physical USB Host backend(s) main_host.c should try, and in what
 // order - fully controlled by the script's `usb_host_backends(*syms)`

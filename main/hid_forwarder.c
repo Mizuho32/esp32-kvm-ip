@@ -156,6 +156,27 @@ void hid_forwarder_send_system_control_to(const struct sockaddr_in *dest, uint16
     send_udp_packet_to(&pkt, dest);
 }
 
+void hid_forwarder_send_raw_bytes_to(const struct sockaddr_in *dest, const uint8_t *data, size_t len)
+{
+    if (s_sock < 0) {
+        return;
+    }
+    if (len > RAW_BYTES_MAX_LEN) {
+        ESP_LOGW(TAG, "raw bytes payload too large (%u > %u) - truncating", (unsigned)len, (unsigned)RAW_BYTES_MAX_LEN);
+        len = RAW_BYTES_MAX_LEN;
+    }
+    // Unlike send_udp_packet_to() (always the fixed PACKET_SIZE), only
+    // send the header plus however many bytes are actually valid - most
+    // UART chunks are much smaller than RAW_BYTES_MAX_LEN, and there's no
+    // reason to pad every datagram out to the max.
+    raw_bytes_packet_t pkt;
+    pkt.magic = RAW_BYTES_MAGIC;
+    pkt.len   = (uint16_t)len;
+    memcpy(pkt.data, data, len);
+    size_t wire_len = offsetof(raw_bytes_packet_t, data) + len;
+    sendto(s_sock, &pkt, wire_len, 0, (struct sockaddr *)dest, sizeof(*dest));
+}
+
 static void send_keyboard_report_raw(uint8_t modifiers, const uint8_t keycodes[6])
 {
     hid_forwarder_send_keyboard_to(&s_target_addr, modifiers, keycodes);

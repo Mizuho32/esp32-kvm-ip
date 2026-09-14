@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -37,6 +38,7 @@
 // call site, single tiny file) - declared here instead.
 extern void mruby_ctype_shim_touch(void);
 #include "protocol.h"
+#include "uart_bridge.h"
 #include "usb_device_typec.h"
 
 #define TAG "MRBFILT"
@@ -106,9 +108,13 @@ extern const uint8_t mruby_default_script_end[]   asm("_binary_default_rb_end");
 // so kind_from_symbol_value()/dsl_sink()'s existing event_kind_hint
 // validation covers it for free, at the cost of two permanently-unused
 // (but tiny) pipeline_t slots.
-enum { PIPE_KEYBOARD, PIPE_MOUSE, PIPE_CONSUMER, PIPE_SYSTEM_CONTROL, PIPE_KIND_COUNT };
+//
+// PIPE_UART (mds/usb_hid/2026-09-14_uart_bridge.md) carries raw byte
+// chunks rather than a fixed HID report - see `source :x, :uart`/
+// `sink :y, :uart` below and dispatch_uart_via().
+enum { PIPE_KEYBOARD, PIPE_MOUSE, PIPE_CONSUMER, PIPE_SYSTEM_CONTROL, PIPE_UART, PIPE_KIND_COUNT };
 
-typedef enum { SINK_TYPEC, SINK_UDP, SINK_BLE } sink_kind_t;
+typedef enum { SINK_TYPEC, SINK_UDP, SINK_BLE, SINK_UART } sink_kind_t;
 
 typedef struct {
     mrb_sym name;
@@ -118,6 +124,9 @@ typedef struct {
     int udp_port;
     bool udp_resolved;            // getaddrinfo() is deferred - see mruby_filter_resolve_udp_sinks()
     struct sockaddr_in udp_addr;  // only meaningful once udp_resolved
+    int uart_port;                // valid when kind == SINK_UART - see uart_bridge.h
+    int uart_tx_pin;
+    int uart_baud;
 } sink_def_t;
 
 typedef struct {
@@ -137,13 +146,16 @@ typedef struct {
     int branch_count;
 } pipeline_t;
 
-typedef enum { SRC_USB_HOST, SRC_UDP } source_type_t;
+typedef enum { SRC_USB_HOST, SRC_UDP, SRC_UART } source_type_t;
 
 typedef struct {
     mrb_sym name;
     source_type_t type;
-    int kind;        // PIPE_* - fixed at declare time for SRC_USB_HOST; unused for SRC_UDP (a :udp source carries any kind, decided per from()'s kind: opt - see dsl_from())
+    int kind;        // PIPE_* - fixed at declare time for SRC_USB_HOST/SRC_UART; unused for SRC_UDP (a :udp source carries any kind, decided per from()'s kind: opt - see dsl_from())
     int listen_port;  // SRC_UDP only
+    int uart_port;    // SRC_UART only - see uart_bridge.h
+    int uart_rx_pin;
+    int uart_baud;
 } source_def_t;
 
 static sink_def_t s_sinks[MRB_DSL_MAX_SINKS];
@@ -362,7 +374,8 @@ static int kind_from_symbol_value(mrb_state *mrb, mrb_value v, const char *what)
     if (strcmp(name, "mouse") == 0) return PIPE_MOUSE;
     if (strcmp(name, "consumer") == 0) return PIPE_CONSUMER;
     if (strcmp(name, "system_control") == 0) return PIPE_SYSTEM_CONTROL;
-    mrb_raisef(mrb, E_ARGUMENT_ERROR, "%s: unknown kind :%s (expected :keyboard/:mouse/:consumer/:system_control)", what, name);
+    if (strcmp(name, "uart") == 0) return PIPE_UART; // :udp source's `from ..., kind: :uart` (network -> UART TX relay)
+    mrb_raisef(mrb, E_ARGUMENT_ERROR, "%s: unknown kind :%s (expected :keyboard/:mouse/:consumer/:system_control/:uart)", what, name);
     return -1; // unreachable, mrb_raisef() is mrb_noreturn
 }
 
@@ -573,9 +586,29 @@ static mrb_value dsl_source(mrb_state *mrb, mrb_value self)
         src->listen_port = (int)mrb_fixnum(listen_v);
         s_net_source_declared = true;
         s_net_source_port = src->listen_port;
+    } else if (strcmp(type_name, "uart") == 0) {
+        // rx: is the only required option - baud:/port: default to
+        // uart_bridge.h's UART_BRIDGE_DEFAULT_BAUD/_PORT. Actual
+        // peripheral setup is deferred to mruby_filter_resolve_uart_bridges()
+        // (called once the whole script has loaded, same reasoning as
+        // :udp sinks' getaddrinfo() deferral) since a matching `sink
+        // ..., :uart, tx: ...` for the same port: may be declared later
+        // in the script and both need to land in one uart_bridge_configure()
+        // call - see mds/usb_hid/2026-09-14_uart_bridge.md.
+        mrb_value rx_v   = dsl_opt(mrb, opts, "rx");
+        mrb_value port_v = dsl_opt(mrb, opts, "port");
+        mrb_value baud_v = dsl_opt(mrb, opts, "baud");
+        if (mrb_nil_p(rx_v)) {
+            mrb_raise(mrb, E_ARGUMENT_ERROR, "source: :uart requires rx: (Integer GPIO)");
+        }
+        src->type         = SRC_UART;
+        src->kind         = PIPE_UART;
+        src->uart_rx_pin  = (int)mrb_fixnum(rx_v);
+        src->uart_port    = mrb_nil_p(port_v) ? UART_BRIDGE_DEFAULT_PORT : (int)mrb_fixnum(port_v);
+        src->uart_baud    = mrb_nil_p(baud_v) ? UART_BRIDGE_DEFAULT_BAUD : (int)mrb_fixnum(baud_v);
     } else {
         mrb_raisef(mrb, E_ARGUMENT_ERROR,
-                   "source: unsupported type :%s (only :usb_host/:udp are implemented - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md)",
+                   "source: unsupported type :%s (only :usb_host/:udp/:uart are implemented - see mds/usb_hid/2026-08-29_mruby_phase1_impl.md)",
                    type_name);
     }
 
@@ -640,8 +673,23 @@ static mrb_value dsl_sink(mrb_state *mrb, mrb_value self)
         sink->udp_host[host_len] = '\0';
         sink->udp_port = (int)mrb_fixnum(port_v);
         sink->udp_resolved = false;
+    } else if (strcmp(type_name, "uart") == 0) {
+        // See dsl_source()'s matching :uart branch - tx:/port:/baud: mean
+        // the same thing here, mirrored for the write side. Actual
+        // peripheral setup deferred to mruby_filter_resolve_uart_bridges()
+        // the same way.
+        mrb_value tx_v   = dsl_opt(mrb, opts, "tx");
+        mrb_value port_v2 = dsl_opt(mrb, opts, "port");
+        mrb_value baud_v = dsl_opt(mrb, opts, "baud");
+        if (mrb_nil_p(tx_v)) {
+            mrb_raise(mrb, E_ARGUMENT_ERROR, "sink: :uart requires tx: (Integer GPIO)");
+        }
+        sink->kind        = SINK_UART;
+        sink->uart_tx_pin = (int)mrb_fixnum(tx_v);
+        sink->uart_port   = mrb_nil_p(port_v2) ? UART_BRIDGE_DEFAULT_PORT : (int)mrb_fixnum(port_v2);
+        sink->uart_baud   = mrb_nil_p(baud_v) ? UART_BRIDGE_DEFAULT_BAUD : (int)mrb_fixnum(baud_v);
     } else {
-        mrb_raisef(mrb, E_ARGUMENT_ERROR, "sink: unsupported type :%s (only :typec/:udp/:ble are implemented)", type_name);
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "sink: unsupported type :%s (only :typec/:udp/:ble/:uart are implemented)", type_name);
     }
 
     s_sink_count++;
@@ -661,7 +709,7 @@ static mrb_value dsl_from(mrb_state *mrb, mrb_value self)
         }
         source_def_t *src = &s_sources[i];
         s_building = true;
-        if (src->type == SRC_USB_HOST) {
+        if (src->type == SRC_USB_HOST || src->type == SRC_UART) {
             s_building_net = false;
             s_building_kind = src->kind;
         } else { // SRC_UDP - no fixed kind of its own, from() must say which
@@ -678,6 +726,23 @@ static mrb_value dsl_from(mrb_state *mrb, mrb_value self)
     }
     mrb_raisef(mrb, E_ARGUMENT_ERROR, "from: unknown source :%s (not declared with source(...))", mrb_sym_name(mrb, name));
     return mrb_nil_value(); // unreachable
+}
+
+// A PIPE_UART pipeline's events are raw byte chunks, not a fixed HID
+// report - :typec/:ble sinks have no C entry point that could carry
+// that (there's no usb_device_typec_raw_bytes_report() etc.), so unlike
+// every other kind (where any sink type is a valid target), only
+// :udp/:uart sinks make sense here. Caught at pipeline-build time
+// (to()/branch() below) rather than left to send_uart_bytes_to_sink()
+// to silently drop at runtime - same "resolve everything once at load
+// time" reasoning as this whole DSL's design.
+static void check_uart_sink_compat(mrb_state *mrb, sink_def_t *sink, const char *who)
+{
+    if (s_building_kind == PIPE_UART && sink->kind != SINK_UDP && sink->kind != SINK_UART) {
+        mrb_raisef(mrb, E_ARGUMENT_ERROR,
+                   "%s: sink :%s can't carry a :uart pipeline's raw bytes (only :udp/:uart sinks can)",
+                   who, mrb_sym_name(mrb, sink->name));
+    }
 }
 
 static mrb_value dsl_to(mrb_state *mrb, mrb_value self)
@@ -706,6 +771,7 @@ static mrb_value dsl_to(mrb_state *mrb, mrb_value self)
         if (sink->event_kind_hint != -1 && sink->event_kind_hint != s_building_kind) {
             mrb_raisef(mrb, E_ARGUMENT_ERROR, "to: sink :%s was declared for a different kind", mrb_sym_name(mrb, sink->name));
         }
+        check_uart_sink_compat(mrb, sink, "to");
         p->to[p->to_count].sink  = sink;
         p->to[p->to_count].block = blk;
         p->to_count++;
@@ -731,6 +797,7 @@ static mrb_value dsl_branch(mrb_state *mrb, mrb_value self)
     if (sink->event_kind_hint != -1 && sink->event_kind_hint != s_building_kind) {
         mrb_raisef(mrb, E_ARGUMENT_ERROR, "branch: sink :%s was declared for a different kind", mrb_sym_name(mrb, sink->name));
     }
+    check_uart_sink_compat(mrb, sink, "branch");
     mrb_gc_register(mrb, blk);
     p->branch[p->branch_count].sink  = sink;
     p->branch[p->branch_count].block = blk;
@@ -1654,6 +1721,72 @@ void mruby_filter_resolve_udp_sinks(void)
     }
 }
 
+// Reserved UART ports this project already claims, checked before handing
+// any `source ..., :uart`/`sink ..., :uart` port: to uart_bridge_configure()
+// - see uart_bridge.h's doc comment. 0 is always the console
+// (CONFIG_ESP_CONSOLE_UART_NUM); 1 is usb_host_rp2040_bridge.c's
+// BRIDGE_UART_PORT, but only actually reserved if that backend is
+// (possibly among others) configured to be tried - mruby_filter_host_backend_count()/_at()
+// are already finalized by the time this runs (mruby_filter_init() fills
+// in the default backend list before returning), so this check is exact,
+// not a guess.
+static bool uart_port_reserved(int port, const char **why)
+{
+    if (port == CONFIG_ESP_CONSOLE_UART_NUM) {
+        *why = "the console (CONFIG_ESP_CONSOLE_UART_NUM)";
+        return true;
+    }
+    if (port == 1) {
+        int count = mruby_filter_host_backend_count();
+        for (int i = 0; i < count; i++) {
+            if (mruby_filter_host_backend_at(i) == MRUBY_HOST_BACKEND_RP2040_BRIDGE) {
+                *why = "usb_host_rp2040_bridge.c's BRIDGE_UART_PORT (rp2040_bridge is a configured USB Host backend)";
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Configures every declared `:uart` source/sink's physical peripheral
+// (uart_bridge.c) and starts RX tasks for the ones with an rx pin. Unlike
+// mruby_filter_resolve_udp_sinks() this has no WiFi/lwIP dependency, so
+// it's safe to call right after mruby_filter_init() - see main_host.c.
+void mruby_filter_resolve_uart_bridges(void)
+{
+    if (!s_active) {
+        return;
+    }
+    for (int i = 0; i < s_source_count; i++) {
+        source_def_t *src = &s_sources[i];
+        if (src->type != SRC_UART) {
+            continue;
+        }
+        const char *why;
+        if (uart_port_reserved(src->uart_port, &why)) {
+            ESP_LOGE(TAG, "source :%s: UART port %d is reserved (%s) - this source will never fire",
+                     mrb_sym_name(s_mrb, src->name), src->uart_port, why);
+            continue;
+        }
+        if (uart_bridge_configure(src->uart_port, src->uart_rx_pin, UART_BRIDGE_PIN_UNUSED, src->uart_baud) == ESP_OK) {
+            uart_bridge_start_rx(src->uart_port);
+        }
+    }
+    for (int i = 0; i < s_sink_count; i++) {
+        sink_def_t *sink = &s_sinks[i];
+        if (sink->kind != SINK_UART) {
+            continue;
+        }
+        const char *why;
+        if (uart_port_reserved(sink->uart_port, &why)) {
+            ESP_LOGE(TAG, "sink :%s: UART port %d is reserved (%s) - sends to it will be dropped",
+                     mrb_sym_name(s_mrb, sink->name), sink->uart_port, why);
+            continue;
+        }
+        uart_bridge_configure(sink->uart_port, UART_BRIDGE_PIN_UNUSED, sink->uart_tx_pin, sink->uart_baud);
+    }
+}
+
 // ---- per-event dispatch --------------------------------------------------
 
 static mrb_value build_keyboard_event(mrb_state *mrb, uint8_t modifiers, const uint8_t keycodes[6])
@@ -1959,6 +2092,99 @@ static void mruby_dispatch_net_consumer(uint16_t usage_id)
     xSemaphoreGive(s_mrb_mutex);
 }
 
+static mrb_value build_uart_event(mrb_state *mrb, const uint8_t *data, size_t len)
+{
+    // A raw byte chunk is just a String in Ruby terms - unlike every
+    // other kind above there's no fixed set of named fields to wrap it
+    // in a Hash for, and a String is what a `to` block naturally wants
+    // to call e.g. .gsub/.each_line on.
+    return mrb_str_new(mrb, (const char *)data, (mrb_int)len);
+}
+
+static void send_uart_bytes_to_sink(sink_def_t *sink, const uint8_t *data, size_t len)
+{
+    if (sink->kind == SINK_UART) {
+        uart_bridge_write(sink->uart_port, data, len);
+    } else if (sink->udp_resolved) {
+        hid_forwarder_send_raw_bytes_to(&sink->udp_addr, data, len);
+    }
+    // :typec/:ble can't reach here - check_uart_sink_compat() rejects
+    // wiring them into a :uart pipeline at script-load time.
+}
+
+static void dispatch_uart_via(pipeline_t *p, const uint8_t *data, size_t len)
+{
+    int ai = mrb_gc_arena_save(s_mrb);
+
+    // Same MRB_TRY/MRB_CATCH wrapping as dispatch_keyboard_via() and the
+    // same reasoning - this runs on every UART chunk read off the wire.
+    struct mrb_jmpbuf *prev_jmp = s_mrb->jmp;
+    struct mrb_jmpbuf c_jmp;
+
+    MRB_TRY(&c_jmp) {
+        s_mrb->jmp = &c_jmp;
+
+        for (int i = 0; i < p->to_count; i++) {
+            to_stage_t *stage = &p->to[i];
+            if (mrb_nil_p(stage->block)) {
+                send_uart_bytes_to_sink(stage->sink, data, len);
+                continue;
+            }
+            mrb_value ev = build_uart_event(s_mrb, data, len);
+            mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
+            if (check_error() || mrb_nil_p(ret)) {
+                continue; // script bug or explicit drop - skip this stage's sink this chunk
+            }
+            if (!mrb_string_p(ret)) {
+                ESP_LOGW(TAG, "uart pipeline: `to` block must return a String (or nil to drop) - dropping this chunk");
+                continue;
+            }
+            send_uart_bytes_to_sink(stage->sink, (const uint8_t *)RSTRING_PTR(ret), (size_t)RSTRING_LEN(ret));
+        }
+        for (int i = 0; i < p->branch_count; i++) {
+            branch_stage_t *stage = &p->branch[i];
+            mrb_value ev = build_uart_event(s_mrb, data, len); // always raw - see design doc
+            mrb_value ret = invoke_block(s_mrb, stage->block, 1, &ev);
+            if (!check_error() && mrb_test(ret)) {
+                send_uart_bytes_to_sink(stage->sink, data, len);
+            }
+        }
+
+        s_mrb->jmp = prev_jmp;
+    } MRB_CATCH(&c_jmp) {
+        s_mrb->jmp = prev_jmp;
+        check_error();
+    } MRB_END_EXC(&c_jmp);
+
+    mrb_gc_arena_restore(s_mrb, ai);
+}
+
+// Local (:uart-sourced) byte chunk - called from uart_bridge.c's RX task.
+// `port` isn't threaded any further than this: every :uart source shares
+// the single PIPE_UART pipeline bucket, same as e.g. every :usb_host
+// mouse source sharing PIPE_MOUSE regardless of which physical device -
+// see this file's PIPE_* enum doc comment. Fine as long as at most one
+// :uart source's RX side is actually in active use, which covers this
+// feature's driving use case (mds/usb_hid/2026-09-14_uart_bridge.md's
+// wireless UART logger) - a script wiring two simultaneous :uart sources
+// to different sinks would see both merged into one pipeline instead.
+void mruby_dispatch_uart_rx(int port, const uint8_t *data, size_t len)
+{
+    (void)port;
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+    dispatch_uart_via(&s_pipelines[PIPE_UART], data, len);
+    xSemaphoreGive(s_mrb_mutex);
+}
+
+// Network (:udp-sourced, kind: :uart) byte chunk - called from
+// net_source_task() below, for the network -> UART TX relay direction.
+static void mruby_dispatch_net_uart(const uint8_t *data, size_t len)
+{
+    xSemaphoreTake(s_mrb_mutex, portMAX_DELAY);
+    dispatch_uart_via(&s_net_pipelines[PIPE_UART], data, len);
+    xSemaphoreGive(s_mrb_mutex);
+}
+
 // ---- network source (:udp) --------------------------------------------
 
 static void net_source_task(void *arg)
@@ -1985,30 +2211,50 @@ static void net_source_task(void *arg)
     }
     ESP_LOGI(TAG, "net source: listening for HID events on UDP port %d", s_net_source_port);
 
-    udp_packet_t pkt;
+    // Two distinct packet shapes can arrive on this one socket - the
+    // fixed-size udp_packet_t (mouse/keyboard/consumer/system_control)
+    // and the variable-size raw_bytes_packet_t (a `:uart`-kind pipeline's
+    // network relay, protocol.h). Both start with a `magic` field at
+    // offset 0, so peek that first to tell them apart before touching
+    // the rest of either shape - see protocol.h's own comment.
+    union {
+        uint16_t           magic;
+        udp_packet_t        hid;
+        raw_bytes_packet_t   raw;
+    } pkt;
     while (1) {
         int len = recvfrom(sock, &pkt, sizeof(pkt), 0, NULL, NULL);
         if (len < 0) {
             ESP_LOGW(TAG, "net source: recvfrom() failed: errno %d", errno);
             continue;
         }
-        if (len != PACKET_SIZE || pkt.magic != PACKET_MAGIC) {
-            ESP_LOGW(TAG, "net source: dropping malformed packet (len=%d, expected %d; magic=0x%04x, expected 0x%04x)",
-                     len, PACKET_SIZE, pkt.magic, PACKET_MAGIC);
-            continue; // malformed or non-protocol traffic on this port - ignore
-        }
-        switch (pkt.type) {
-        case EVENT_TYPE_KEYBOARD:
-            mruby_dispatch_net_keyboard(pkt.keyboard.modifiers, pkt.keyboard.keycodes);
-            break;
-        case EVENT_TYPE_MOUSE:
-            mruby_dispatch_net_mouse(pkt.mouse.buttons, pkt.mouse.dx, pkt.mouse.dy, pkt.mouse.wheel, pkt.mouse.pan);
-            break;
-        case EVENT_TYPE_CONSUMER:
-            mruby_dispatch_net_consumer(pkt.consumer.usage_id);
-            break;
-        default:
-            break;
+        if (pkt.magic == PACKET_MAGIC) {
+            if (len != PACKET_SIZE) {
+                ESP_LOGW(TAG, "net source: dropping malformed HID packet (len=%d, expected %d)", len, PACKET_SIZE);
+                continue;
+            }
+            switch (pkt.hid.type) {
+            case EVENT_TYPE_KEYBOARD:
+                mruby_dispatch_net_keyboard(pkt.hid.keyboard.modifiers, pkt.hid.keyboard.keycodes);
+                break;
+            case EVENT_TYPE_MOUSE:
+                mruby_dispatch_net_mouse(pkt.hid.mouse.buttons, pkt.hid.mouse.dx, pkt.hid.mouse.dy, pkt.hid.mouse.wheel, pkt.hid.mouse.pan);
+                break;
+            case EVENT_TYPE_CONSUMER:
+                mruby_dispatch_net_consumer(pkt.hid.consumer.usage_id);
+                break;
+            default:
+                break;
+            }
+        } else if (pkt.magic == RAW_BYTES_MAGIC) {
+            size_t hdr_len = offsetof(raw_bytes_packet_t, data);
+            if ((size_t)len < hdr_len || pkt.raw.len > RAW_BYTES_MAX_LEN || (size_t)len != hdr_len + pkt.raw.len) {
+                ESP_LOGW(TAG, "net source: dropping malformed raw bytes packet (len=%d)", len);
+                continue;
+            }
+            mruby_dispatch_net_uart(pkt.raw.data, pkt.raw.len);
+        } else {
+            ESP_LOGW(TAG, "net source: dropping packet with unknown magic 0x%04x", pkt.magic);
         }
     }
 }

@@ -38,6 +38,7 @@ if(KVM_ROLE STREQUAL "HOST")
             "ota_updater.c"
             "heap_monitor.c"
             "crash_report.c"
+            "uart_bridge.c"
         INCLUDE_DIRS "."
         EMBED_TXTFILES
             "mruby_scripts/default.rb"

@@ -59,6 +59,28 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(udp_packet_t) == PACKET_SIZE,
                "Packet must be exactly 16 bytes");
 
+// ── Raw byte payload packet (mruby_filter.c's `:uart` source/sink DSL -
+// mds/usb_hid/2026-09-14_uart_bridge.md) ────────────────────────────
+//
+// Deliberately a *separate* packet shape from udp_packet_t above, not a
+// new event_type_t case inside it: unlike every existing event kind here
+// (mouse/keyboard/consumer/system_control), a UART byte chunk has no
+// fixed size, and forcing it into udp_packet_t's 8-byte payload union
+// would mean one UDP datagram per ~8 bytes read off the wire. The two
+// shapes share the same first field (a magic number) at the same offset,
+// so a receiver can always peek that first regardless of which shape a
+// packet turns out to be - see network_task.c/mruby_filter.c's
+// net_source_task(), both of which share one socket/port with the
+// existing fixed-report traffic.
+#define RAW_BYTES_MAGIC   0xB17E
+#define RAW_BYTES_MAX_LEN 512 // comfortably under one UDP/Ethernet MTU (1472) - no IP fragmentation
+
+typedef struct __attribute__((packed)) {
+    uint16_t magic;                   // RAW_BYTES_MAGIC
+    uint16_t len;                     // 0..RAW_BYTES_MAX_LEN - how much of data[] is actually valid
+    uint8_t  data[RAW_BYTES_MAX_LEN];
+} raw_bytes_packet_t;
+
 // ── Internal event (passed via xQueue) ─────────────────────────
 typedef struct {
     event_type_t type;
