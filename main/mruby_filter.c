@@ -114,9 +114,17 @@ extern const uint8_t mruby_default_script_end[]   asm("_binary_default_rb_end");
 // `sink :y, :uart` below and dispatch_uart_via().
 enum { PIPE_KEYBOARD, PIPE_MOUSE, PIPE_CONSUMER, PIPE_SYSTEM_CONTROL, PIPE_UART, PIPE_KIND_COUNT };
 
-typedef enum { SINK_TYPEC, SINK_UDP, SINK_BLE, SINK_UART } sink_kind_t;
+// SINK_VIRTUAL (mds/usb_hid/2026-09-15_virtual_sink.md): a named
+// indirection - `to`/`branch` wire to it exactly like any other sink,
+// but which *real* sink it currently forwards to (or none at all) is
+// switched at runtime via `virtual_sink_set`, not fixed at script-load
+// time. This is what makes an actual exclusive switch (only ever one of
+// :typec/:ble active, never both at once) a one-line runtime call
+// instead of hand-rolled `if $active == :x` conditionals duplicated in
+// every pipeline's `to` block.
+typedef enum { SINK_TYPEC, SINK_UDP, SINK_BLE, SINK_UART, SINK_VIRTUAL } sink_kind_t;
 
-typedef struct {
+typedef struct sink_def_s {
     mrb_sym name;
     sink_kind_t kind;
     int event_kind_hint;          // -1 = none given; else PIPE_* (sink's own `kind:` opt, validated against whichever pipeline references it)
@@ -127,6 +135,7 @@ typedef struct {
     int uart_port;                // valid when kind == SINK_UART - see uart_bridge.h
     int uart_tx_pin;
     int uart_baud;
+    struct sink_def_s *virtual_target; // valid when kind == SINK_VIRTUAL; NULL = not currently routed anywhere
 } sink_def_t;
 
 typedef struct {
@@ -480,6 +489,70 @@ static sink_def_t *find_sink(mrb_state *mrb, mrb_sym name)
     return NULL; // unreachable
 }
 
+// `virtual_sink_set(:name, :real_sink_or_nil)` - see
+// mds/usb_hid/2026-09-15_virtual_sink.md. Safe to call from anywhere,
+// including from inside a `to`/`branch` block reacting to a hotkey (same
+// as e.g. ble_pair_switch()) - this just flips a plain C pointer, no
+// allocation or blocking I/O involved. `nil` clears it (routes nowhere,
+// same as never having called this at all).
+static mrb_value ruby_virtual_sink_set(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_sym vname;
+    mrb_value target_v;
+    mrb_get_args(mrb, "no", &vname, &target_v);
+
+    sink_def_t *vsink = find_sink(mrb, vname);
+    if (vsink->kind != SINK_VIRTUAL) {
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "virtual_sink_set: :%s is not a :virtual sink", mrb_sym_name(mrb, vname));
+    }
+
+    if (mrb_nil_p(target_v)) {
+        vsink->virtual_target = NULL;
+        return mrb_nil_value();
+    }
+    if (mrb_type(target_v) != MRB_TT_SYMBOL) {
+        mrb_raise(mrb, E_ARGUMENT_ERROR, "virtual_sink_set: target must be a Symbol or nil");
+    }
+    sink_def_t *target = find_sink(mrb, mrb_symbol(target_v));
+    if (target->kind == SINK_VIRTUAL) {
+        mrb_raisef(mrb, E_ARGUMENT_ERROR,
+                   "virtual_sink_set: target :%s can't itself be :virtual (no chained indirection)",
+                   mrb_sym_name(mrb, target->name));
+    }
+    // Same "only check if both sides actually declared one" leniency as
+    // dsl_to()/dsl_branch()'s own event_kind_hint check - a :typec/:ble
+    // target with no `kind:` of its own can't be verified either way, so
+    // it's trusted rather than rejected (matches how it's already usable
+    // unchecked from a normal, non-virtual pipeline).
+    if (target->event_kind_hint != -1 && target->event_kind_hint != vsink->event_kind_hint) {
+        mrb_raisef(mrb, E_ARGUMENT_ERROR,
+                   "virtual_sink_set: target :%s's kind doesn't match :%s's declared kind",
+                   mrb_sym_name(mrb, target->name), mrb_sym_name(mrb, vsink->name));
+    }
+    vsink->virtual_target = target;
+    return mrb_nil_value();
+}
+
+// `virtual_sink_target(:name)` - returns the Symbol name of whichever
+// real sink :name currently forwards to, or nil if unset. Useful for a
+// script to display/report current routing state (e.g. the
+// mds/usb_hid/2026-09-14_m5stack_uart_console_idea.md status-panel idea).
+static mrb_value ruby_virtual_sink_target(mrb_state *mrb, mrb_value self)
+{
+    (void)self;
+    mrb_sym vname;
+    mrb_get_args(mrb, "n", &vname);
+    sink_def_t *vsink = find_sink(mrb, vname);
+    if (vsink->kind != SINK_VIRTUAL) {
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "virtual_sink_target: :%s is not a :virtual sink", mrb_sym_name(mrb, vname));
+    }
+    if (vsink->virtual_target == NULL) {
+        return mrb_nil_value();
+    }
+    return mrb_symbol_value(vsink->virtual_target->name);
+}
+
 // Matches usb_descriptors.c's SYSTEM_CONTROL_USAGE_MIN/MAX (kept as a
 // second literal copy rather than a shared header - this file doesn't
 // otherwise include usb_descriptors.h, and it's 2 constants) - the
@@ -538,12 +611,34 @@ static uint16_t system_control_usage_from_value(mrb_state *mrb, mrb_value v)
     return 0; // unreachable
 }
 
+// Resolves a :virtual sink (mds/usb_hid/2026-09-15_virtual_sink.md) to
+// whichever real sink it currently targets - NULL if none has been
+// assigned yet, or virtual_sink_set() explicitly cleared it. Every
+// send_*_to_sink() below calls this first, so :virtual sinks work
+// transparently anywhere a real sink could be used, with zero changes
+// needed to dispatch_*_via()'s own to/branch loops - they just keep
+// calling send_*_to_sink(stage->sink, ...) exactly as before. Only one
+// level of indirection is ever possible (virtual_sink_set() itself
+// rejects pointing a :virtual sink at another :virtual sink), so this
+// never needs to loop.
+static sink_def_t *resolve_sink(sink_def_t *sink)
+{
+    if (sink->kind == SINK_VIRTUAL) {
+        return sink->virtual_target;
+    }
+    return sink;
+}
+
 // Same dispatch shape as send_consumer_to_sink() (below, next to
 // dispatch_consumer_via()) - kept here instead since dsl_system_control()
 // (which needs it) comes much earlier in this file than that section, and
 // this has no dependency on the pipeline/dispatch machinery those share.
 static void send_system_control_to_sink(sink_def_t *sink, uint16_t usage_id)
 {
+    sink = resolve_sink(sink);
+    if (sink == NULL) {
+        return;
+    }
     if (sink->kind == SINK_TYPEC) {
         usb_device_typec_system_control_report(usage_id);
     } else if (sink->kind == SINK_BLE) {
@@ -688,8 +783,24 @@ static mrb_value dsl_sink(mrb_state *mrb, mrb_value self)
         sink->uart_tx_pin = (int)mrb_fixnum(tx_v);
         sink->uart_port   = mrb_nil_p(port_v2) ? UART_BRIDGE_DEFAULT_PORT : (int)mrb_fixnum(port_v2);
         sink->uart_baud   = mrb_nil_p(baud_v) ? UART_BRIDGE_DEFAULT_BAUD : (int)mrb_fixnum(baud_v);
+    } else if (strcmp(type_name, "virtual") == 0) {
+        // See mds/usb_hid/2026-09-15_virtual_sink.md. `kind:` is
+        // *required* here (unlike :typec/:ble, where it's an optional
+        // cross-check) since there's no other way to know what shape of
+        // event a pipeline can safely wire to this sink - virtual_target
+        // starts unset (routes nowhere) until virtual_sink_set() is
+        // called, typically once at script load to pick a default and
+        // again later (e.g. from a hotkey's `to`/`branch` block) to
+        // actually switch.
+        mrb_value kind_v = dsl_opt(mrb, opts, "kind");
+        if (mrb_nil_p(kind_v)) {
+            mrb_raise(mrb, E_ARGUMENT_ERROR, "sink: :virtual requires kind: (there's no real backend to infer it from)");
+        }
+        sink->kind = SINK_VIRTUAL;
+        sink->event_kind_hint = kind_from_symbol_value(mrb, kind_v, "sink");
+        sink->virtual_target = NULL;
     } else {
-        mrb_raisef(mrb, E_ARGUMENT_ERROR, "sink: unsupported type :%s (only :typec/:udp/:ble/:uart are implemented)", type_name);
+        mrb_raisef(mrb, E_ARGUMENT_ERROR, "sink: unsupported type :%s (only :typec/:udp/:ble/:uart/:virtual are implemented)", type_name);
     }
 
     s_sink_count++;
@@ -781,6 +892,16 @@ static mrb_value dsl_to(mrb_state *mrb, mrb_value self)
         // is meant for this kind of cross-kind reshaping.
         if (s_building_kind != PIPE_UART && sink->event_kind_hint != -1 && sink->event_kind_hint != s_building_kind) {
             mrb_raisef(mrb, E_ARGUMENT_ERROR, "to: sink :%s was declared for a different kind", mrb_sym_name(mrb, sink->name));
+        }
+        // :virtual sinks aren't supported as a :uart pipeline's target
+        // (see send_uart_bytes_to_sink()'s doc comment) - not a
+        // fundamental impossibility like :typec/:ble (rejected on
+        // s_building_kind's own terms above, via event_kind_hint), just
+        // not implemented yet: a virtual sink's *current* target could
+        // be byte-capable or not depending on runtime state.
+        if (s_building_kind == PIPE_UART && sink->kind == SINK_VIRTUAL) {
+            mrb_raisef(mrb, E_ARGUMENT_ERROR,
+                       "to: :virtual sink :%s can't be used from a :uart pipeline yet", mrb_sym_name(mrb, sink->name));
         }
         p->to[p->to_count].sink  = sink;
         p->to[p->to_count].block = blk;
@@ -1545,6 +1666,8 @@ static void define_dsl_methods(mrb_state *mrb)
     mrb_define_method(mrb, k, "debug_print_to", ruby_debug_print_to, MRB_ARGS_REST());
     mrb_define_method(mrb, k, "source",   dsl_source,   MRB_ARGS_ARG(2, 1));
     mrb_define_method(mrb, k, "sink",     dsl_sink,     MRB_ARGS_ARG(2, 1));
+    mrb_define_method(mrb, k, "virtual_sink_set", ruby_virtual_sink_set, MRB_ARGS_REQ(2));
+    mrb_define_method(mrb, k, "virtual_sink_target", ruby_virtual_sink_target, MRB_ARGS_REQ(1));
     mrb_define_method(mrb, k, "pipeline", dsl_pipeline, MRB_ARGS_REQ(1) | MRB_ARGS_BLOCK());
     mrb_define_method(mrb, k, "from",     dsl_from,     MRB_ARGS_ARG(1, 1));
     mrb_define_method(mrb, k, "to",       dsl_to,       MRB_ARGS_REST() | MRB_ARGS_BLOCK());
@@ -1844,6 +1967,10 @@ static void read_keycodes(mrb_state *mrb, mrb_value h, uint8_t out[6], const uin
 
 static void send_keyboard_to_sink(sink_def_t *sink, uint8_t modifiers, const uint8_t keycodes[6])
 {
+    sink = resolve_sink(sink);
+    if (sink == NULL) {
+        return;
+    }
     if (sink->kind == SINK_TYPEC) {
         usb_device_typec_keyboard_report(modifiers, keycodes);
     } else if (sink->kind == SINK_BLE) {
@@ -1941,6 +2068,10 @@ static mrb_value build_mouse_event(mrb_state *mrb, uint8_t buttons, int16_t dx, 
 
 static void send_mouse_to_sink(sink_def_t *sink, uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel, int8_t pan)
 {
+    sink = resolve_sink(sink);
+    if (sink == NULL) {
+        return;
+    }
     if (sink->kind == SINK_TYPEC) {
         usb_device_typec_mouse_report(buttons, dx, dy, wheel, pan);
     } else if (sink->kind == SINK_BLE) {
@@ -2052,6 +2183,10 @@ static mrb_value build_consumer_event(mrb_state *mrb, uint16_t usage_id)
 
 static void send_consumer_to_sink(sink_def_t *sink, uint16_t usage_id)
 {
+    sink = resolve_sink(sink);
+    if (sink == NULL) {
+        return;
+    }
     if (sink->kind == SINK_TYPEC) {
         usb_device_typec_consumer_report(usage_id);
     } else if (sink->kind == SINK_BLE) {
@@ -2140,6 +2275,13 @@ static void send_uart_bytes_to_sink(sink_def_t *sink, const uint8_t *data, size_
     // targeting one is rejected at load time (dsl_to()/check_uart_branch_sink_compat()),
     // and a `to` block's Hash-returning path below calls
     // send_hash_event_to_typec_or_ble_sink() instead of this function.
+    // :virtual sinks are rejected the same way at load time (see
+    // dsl_to()'s PIPE_UART check) - a :virtual sink's *current* target
+    // could be byte-capable or not depending on runtime state, which
+    // dispatch_uart_via()'s to-loop can't classify up front the way it
+    // does for every other (fixed-at-declare-time) sink kind - not
+    // supported in this first version, see
+    // mds/usb_hid/2026-09-15_virtual_sink.md.
 }
 
 // Lets a :uart pipeline's `to` block synthesize real keyboard/mouse/
